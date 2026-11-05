@@ -2,7 +2,9 @@
 // the paper stack for depth, and the strike for completion.
 import * as S from './store.js';
 import { st, $, h, pageRoot } from './state.js';
-import { formatDay, describeRRule, fromYMD } from './parse.js';
+import { formatDay as fmtDay, describeRRule, fromYMD } from './parse.js';
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+const formatDay = (d, now) => { if (!YMD.test(String(d))) return ''; try { return fmtDay(d, now); } catch { return ''; } };
 import { drawStrike } from './strike.js';
 import { today } from './actions.js';
 
@@ -88,6 +90,7 @@ function makeRow(id) {
     '<button class="ct" tabindex="-1" aria-label="Open"></button>';
   const tx = el.querySelector('.tx');
   tx.contentEditable = CE;
+  tx.tabIndex = -1; // the row is the Tab stop (roving tabindex); Enter edits
   tx.setAttribute('role', 'textbox');
   tx.setAttribute('aria-label', 'Title');
   el._tx = tx;
@@ -108,9 +111,11 @@ export function fillRow(el, id, m, smart) {
   el.classList.toggle('cur', st.cursor === id);
   el.classList.toggle('trashed', st.route.view === 'trash');
   el.classList.toggle('smart', !!smart);
+  el.classList.toggle('log', S.val(id, 'kind') === 'log');
   el.setAttribute('aria-level', (m.depth || 0) + 1);
   if (kidsN && !smart) el.setAttribute('aria-expanded', String(!collapsed)); else el.removeAttribute('aria-expanded');
   el.setAttribute('aria-selected', String(st.sel.has(id)));
+  el.tabIndex = st.cursor === id ? 0 : -1;
   const ck = el.children[1];
   ck.setAttribute('aria-checked', String(!!done));
   // title (never clobber the text being edited)
@@ -158,14 +163,22 @@ export function fillRow(el, id, m, smart) {
   if (!done && el._done) { el._strikeQ = null; const s = el.querySelector('.tl > svg.strike'); if (s) s.remove(); }
   el._done = !!done;
 }
+/** Re-fill one rendered row in place (the typing fast path). */
+export function refillRow(id) {
+  const el = els.get(id), m = st.info.get(id);
+  if (!el || !m) return;
+  fillRow(el, id, m, st.route.view !== 'node' && st.route.view !== 'inbox');
+  queueStrikes();
+}
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const safeDescribe = (r) => { try { return describeRRule(r); } catch { return 'Repeats'; } };
 
 function flushStrikes() {
-  for (const [id, el] of els) {
-    if (!el._done || !el.isConnected) continue;
+  // Read every width first, then draw: no read/write interleaving (audit S3-3).
+  const work = [];
+  for (const [id, el] of els) if (el._done && el.isConnected && el._tx) work.push([id, el, el._tx.getBoundingClientRect().width]);
+  for (const [id, el, w] of work) {
     const tl = el.querySelector('.tl');
-    const w = el._tx.getBoundingClientRect().width;
     if (el._strikeQ === 'anim') {
       el._strikeQ = null;
       // Let the title condense first, then measure and draw (docs/PLAN.md §11.4).
@@ -178,7 +191,14 @@ function flushStrikes() {
 }
 let strikeRaf = 0;
 export function queueStrikes() { if (!strikeRaf) strikeRaf = requestAnimationFrame(() => { strikeRaf = 0; flushStrikes(); }); }
-new ResizeObserver(() => { for (const el of els.values()) el._sw = -1; queueStrikes(); }).observe(document.documentElement);
+let lastW = 0;
+new ResizeObserver((e) => {
+  const w = Math.round(e[0].contentRect.width);
+  if (w === lastW) return; // only width changes can re-wrap titles
+  lastW = w;
+  for (const el of els.values()) el._sw = -1;
+  queueStrikes();
+}).observe(document.documentElement);
 
 /* ---------------- reconcile + FLIP ---------------- */
 function reconcile(box, nodes) {
@@ -254,6 +274,8 @@ export function renderPage(opts = {}) {
   }
   for (const k of [...els.keys()]) if (!seen.has(k)) els.delete(k);
   reconcile(box, nodes);
+  // Roving tabindex: exactly one row is a Tab stop (the cursor, else the first row).
+  if (!st.cursor || !st.rows.includes(st.cursor)) { const f = st.rows[0] && els.get(st.rows[0]); if (f) f.tabIndex = 0; }
   if (active && active.isConnected && document.activeElement !== active && active !== document.body) active.focus({ preventScroll: true });
   renderEmpty();
   play(before);

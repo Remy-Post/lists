@@ -30,7 +30,8 @@ self.addEventListener('fetch', (e) => {
     const hit = await caches.match(req, { cacheName: CACHE, ignoreSearch: true });
     if (hit) return hit;
     const res = await fetch(req);
-    if (res.ok && url.pathname.startsWith('/assets/')) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
+    // Never cache the HTML fallback a server returns for a missing asset.
+    if (res.ok && url.pathname.startsWith('/assets/') && !(res.headers.get('content-type') || '').includes('text/html')) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
     return res;
   })());
 });

@@ -94,8 +94,8 @@ export function strikeLight(host, opts = {}) {
     p ||= PAPER[dark ? 'dark' : 'light'];
     // Highlight: a cool lift of the paper. Shadow: graphite pulled from the paper itself.
     tone = dark
-      ? [p.map((x) => lerp(x, 0.9, 0.82)), p.map((x) => x * 0.25), [0.06, 0.26]]
-      : [p.map((x) => lerp(x, 1, 1)), p.map((x) => x * 0.3), [0.9, 0.05]];
+      ? [p.map((x, i) => lerp(x, [0.85, 0.89, 0.96][i], 0.85)), p.map((x) => x * 0.25), [0.06, 0.26]]
+      : [[1, 1, 1], p.map((x) => x * 0.3), [0.9, 0.05]];
     dirty = 1;
   }
 

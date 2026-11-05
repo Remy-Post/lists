@@ -8,7 +8,7 @@ import { join, extname, basename } from 'node:path';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execSync } from 'node:child_process';
 
-const SRC = 'src', OUT = 'dist', A = join(OUT, 'assets');
+const SRC = 'src', OUT = process.env.OUT || 'dist', A = join(OUT, 'assets');
 const hash = (buf) => createHash('sha256').update(buf).digest('hex').slice(0, 10);
 let rev = 'local';
 try { rev = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch {}
@@ -39,14 +39,29 @@ for (const f of ['app.css', 'phone.css', 'desk.css']) {
   names[f] = n;
 }
 
-// JS
+// JS. The lazy modules (gl, panels) import nothing, so they are built standalone and hashed first;
+// the app bundle then refers to them as external files. Result: one app file with no static chunks.
+const lazyNames = {};
+for (const m of ['gl', 'panels']) {
+  const r = await build({ entryPoints: [join(SRC, 'js', m + '.js')], bundle: true, format: 'esm', minify: true, write: false,
+    target: ['chrome111', 'safari16.4', 'firefox115'], legalComments: 'none' });
+  const out = r.outputFiles[0].contents;
+  const n = `${m}-${hash(out)}.js`;
+  writeFileSync(join(A, n), out);
+  lazyNames[m] = n;
+}
+const lazyPlugin = { name: 'lazy', setup(b) { b.onResolve({ filter: /^\.\/(gl|panels)\.js$/ }, (a) => ({ path: './' + lazyNames[a.path.slice(2, -3)], external: true })); } };
 const js = await build({
-  entryPoints: [join(SRC, 'js', 'main.js')], bundle: true, splitting: true, format: 'esm', minify: true,
-  target: ['chrome111', 'safari16.4', 'firefox115'], outdir: A, entryNames: 'app-[hash]', chunkNames: 'c-[hash]',
-  define: { LISTS_BUILD: JSON.stringify(VERSION) }, metafile: true, legalComments: 'none', write: true,
+  entryPoints: [join(SRC, 'js', 'main.js')], bundle: true, splitting: false, format: 'esm', minify: true,
+  target: ['chrome111', 'safari16.4', 'firefox115'], write: false, plugins: [lazyPlugin],
+  define: { LISTS_BUILD: JSON.stringify(VERSION) }, metafile: true, legalComments: 'none',
 });
-for (const [out, meta] of Object.entries(js.metafile.outputs)) {
-  if (meta.entryPoint === 'src/js/main.js') names['app.js'] = basename(out);
+const appOut = js.outputFiles[0].contents;
+names['app.js'] = `app-${hash(appOut)}.js`;
+writeFileSync(join(A, names['app.js']), appOut);
+for (const [, meta] of Object.entries(js.metafile.outputs)) {
+  const st = meta.imports.filter((i) => i.kind === 'import-statement');
+  if (st.length) { console.error('Static import on the critical path (request waterfall): ' + st.map((i) => i.path).join(', ')); process.exitCode = 1; }
 }
 
 // HTML
@@ -67,7 +82,9 @@ writeFileSync(join(OUT, 'version.txt'), VERSION + '\n');
 // Service worker: precache the shell and every asset of this build.
 const assets = readdirSync(A).filter((f) => f !== 'OFL.txt').map((f) => '/assets/' + f);
 const pre = ['/', '/manifest.webmanifest', '/icon.svg', ...assets, ...(existsSync(join(OUT, 'icons')) ? readdirSync(join(OUT, 'icons')).map((f) => '/icons/' + f) : [])];
-let sw = readFileSync(join(SRC, 'sw.js'), 'utf8').replace('__VERSION__', VERSION).replace('__PRECACHE__', JSON.stringify(pre));
+// The cache name follows the content (hashed asset names), so every real change gets a fresh cache.
+const swVersion = VERSION + '-' + hash(JSON.stringify(pre) + readFileSync(join(OUT, 'index.html')));
+let sw = readFileSync(join(SRC, 'sw.js'), 'utf8').replace('__VERSION__', swVersion).replace('__PRECACHE__', JSON.stringify(pre));
 const swMin = await build({ stdin: { contents: sw, loader: 'js' }, write: false, minify: true, target: ['chrome111', 'safari16.4'] });
 writeFileSync(join(OUT, 'sw.js'), swMin.outputFiles[0].contents);
 

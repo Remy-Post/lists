@@ -20,6 +20,7 @@ function observe(h) {
   if (typeof h !== 'string') return;
   const [a, b] = h.split('.');
   const ms = parseInt(a, 36), c = parseInt(b, 36);
+  if (!(ms <= Date.now() + 864e5) || !(c >= 0) || c > 1e6) return; // ignore corrupt or far-future stamps
   if (ms > lastMs) { lastMs = ms; ctr = c; } else if (ms === lastMs && c > ctr) ctr = c;
 }
 
@@ -105,18 +106,26 @@ let persistHook = () => {};
 export const onPersist = (fn) => { persistHook = fn; };
 const subs = new Set();
 export const subscribe = (fn) => { subs.add(fn); return () => subs.delete(fn); };
-let pending = null, pendingStructural = false;
-function changed(id, structural) {
+let pending = null, pendingStructural = false, pendingFields = null;
+export let version = 0;
+function changed(id, structural, fields) {
+  version++;
+  memo.clear();
   if (structural) { pendingStructural = true; orderCache = null; }
   (pending ||= new Set()).add(id);
+  pendingFields ||= new Set();
+  if (fields) for (const f of fields) pendingFields.add(f); else pendingFields.add('*');
   queueMicrotask(flushSubs);
 }
 function flushSubs() {
   if (!pending) return;
-  const ids = pending, s = pendingStructural;
-  pending = null; pendingStructural = false;
-  for (const fn of subs) fn(ids, s);
+  const ids = pending, s = pendingStructural, f = pendingFields;
+  pending = null; pendingStructural = false; pendingFields = null;
+  for (const fn of subs) fn(ids, s, f);
 }
+/* Per-version memo for whole-tree queries (cleared on every change). */
+const memo = new Map();
+const memoize = (key, fn) => { if (!memo.has(key)) memo.set(key, fn()); return memo.get(key); };
 
 export const newId = () => 'n' + Date.now().toString(36) + crypto.getRandomValues(new Uint32Array(2)).reduce((s, x) => s + x.toString(36), '');
 
@@ -127,14 +136,17 @@ export function patch(id, fields) {
   let structural = !r;
   if (!r) { r = { id, f: {}, v: h }; recs.set(id, r); }
   const oldParent = eff.get(id);
+  const wasVoid = r.f.deleted && r.f.deleted[0] === 'void';
   for (const k in fields) {
     r.f[k] = [fields[k], h];
     if (k === 'pos' || k === 'deleted') structural = true;
   }
   r.v = h;
-  if (structural) reparent(id, oldParent);
+  // A void node's children fall back to the Inbox, so voiding or un-voiding re-parents its subtree.
+  if (wasVoid !== (r.f.deleted && r.f.deleted[0] === 'void') && childrenAll(id).length) rebuild();
+  else if (structural) reparent(id, oldParent);
   persistHook(r, true);
-  changed(id, structural);
+  changed(id, structural, Object.keys(fields));
   return r;
 }
 
@@ -162,7 +174,7 @@ export function mergeRemote(list) {
     }
   }
   if (structural) rebuild();
-  for (const id of touched) changed(id, structural);
+  for (const id of touched) changed(id, structural, null);
   return touched.length;
 }
 
@@ -177,7 +189,9 @@ export function hydrate(list) {
 function rawParent(id) {
   if (id === INBOX) return ROOT;
   const p = posOf(recs.get(id)).parent;
-  return p === ROOT || recs.has(p) ? p : INBOX;
+  if (p === ROOT) return p;
+  const pr = recs.get(p);
+  return pr && !(pr.f.deleted && pr.f.deleted[0] === 'void') ? p : INBOX;
 }
 function insertSorted(p, id) {
   let arr = kids.get(p);
@@ -216,7 +230,7 @@ function rebuild() {
       do { ring.push(c); c = eff.get(c); } while (c !== cyc);
       ring.sort((a, b) => (pstamp(b) > pstamp(a) ? 1 : pstamp(b) < pstamp(a) ? -1 : b > a ? 1 : -1));
       const loser = ring[0], prev = posOf(recs.get(loser)).prev;
-      eff.set(loser, prev && prev !== loser && recs.has(prev) && !reaches(prev, loser) ? prev : INBOX);
+      eff.set(loser, prev === ROOT ? ROOT : prev && prev !== loser && recs.has(prev) && !reaches(prev, loser) ? prev : INBOX);
     }
   }
   for (const [id, p] of eff) { let a = kids.get(p); if (!a) kids.set(p, (a = [])); a.push(id); }
@@ -252,11 +266,24 @@ export function doneEff(id) {
   for (let c = id; c && c !== ROOT; c = eff.get(c)) if (val(c, 'done')) return true;
   return false;
 }
-export function countOpen(id) { // open descendants (any depth)
-  let n = 0;
-  const walk = (p) => { for (const c of children(p)) { if (!val(c, 'done') && !val(c, 'heading')) n++; walk(c); } };
-  walk(id);
-  return n;
+/** Open descendants (any depth). One O(n) pass per store version, then O(1) per call. */
+export function countOpen(id) {
+  const m = memoize('open', () => {
+    const out = new Map();
+    const walk = (p) => {
+      let n = 0;
+      for (const c of children(p)) {
+        if (val(c, 'kind') === 'log') continue;
+        const sub = walk(c);
+        n += sub + (!val(c, 'done') && !val(c, 'heading') ? 1 : 0);
+      }
+      out.set(p, n);
+      return n;
+    };
+    walk(ROOT);
+    return out;
+  });
+  return m.get(id) || 0;
 }
 export function descendants(id, out = []) { for (const c of children(id)) { out.push(c); descendants(c, out); } return out; }
 
@@ -275,7 +302,7 @@ export function posAt(parent, i, skip, prevParent = null) {
 }
 function rekey(parent) { // rare: two devices inserted at the same spot with equal keys
   let k = null;
-  for (const id of childrenAll(parent)) {
+  for (const id of [...childrenAll(parent)]) {
     k = keyBetween(k, null);
     const p = posOf(recs.get(id));
     patch(id, { pos: { parent: p.parent, key: k, prev: p.prev } });
@@ -294,7 +321,8 @@ export function order() {
 }
 const byOrder = (a, b) => (order().get(a) ?? 0) - (order().get(b) ?? 0);
 
-function liveOpenItems() {
+function liveOpenItems() { return memoize('open-items', liveOpenItemsRaw); }
+function liveOpenItemsRaw() {
   const out = [];
   const walk = (p, doneAbove) => {
     for (const c of children(p)) {
@@ -307,7 +335,8 @@ function liveOpenItems() {
   return out;
 }
 /** Today: scheduled on/before today, or deadline on/before today. Split by evening. */
-export function qToday(today) {
+export function qToday(today) { return memoize('today:' + today, () => qTodayRaw(today)); }
+function qTodayRaw(today) {
   const day = [], eve = [];
   for (const id of liveOpenItems()) {
     const w = val(id, 'when'), dl = val(id, 'deadline');

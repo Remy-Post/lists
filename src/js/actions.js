@@ -10,6 +10,13 @@ const ctx = () => ({ route: { ...st.route }, sel: st.cursor });
 let notify = () => {};
 export const setNotify = (fn) => { notify = fn; };
 
+/** Siblings the user can actually see in an outline (hidden completed items and repeat logs excluded). */
+const dayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return +d; };
+export function visible(id) {
+  if (S.val(id, 'kind') === 'log') return false;
+  return st.showDone || !(S.val(id, 'done') && (S.val(id, 'doneAt') || 0) < dayStart());
+}
+const outlinePage = () => st.route.view === 'node' || st.route.view === 'inbox';
 /** Ids in document order, dropping any whose ancestor is also in the set. */
 export function tops(ids) {
   const set = new Set(ids);
@@ -128,7 +135,7 @@ export function indent(ids = target()) {
   let moved = false;
   O.tx('Indent', () => {
     for (const id of list) {
-      const p = S.parentOf(id), sib = S.children(p), i = sib.indexOf(id);
+      const p = S.parentOf(id), sib = S.children(p).filter((x) => x === id || visible(x)), i = sib.indexOf(id);
       let np = null;
       for (let j = i - 1; j >= 0; j--) if (!list.includes(sib[j])) { np = sib[j]; break; }
       if (!np || !S.canMove(id, np)) continue;
@@ -158,12 +165,13 @@ export function outdent(ids = target()) {
 }
 export function moveBy(dir, ids = target()) {
   const list = tops(ids);
-  if (!list.length) return;
+  if (!list.length || !outlinePage()) return; // smart views: visual order isn't tree order (audit S2-5)
   const p = S.parentOf(list[0]);
   if (!list.every((x) => S.parentOf(x) === p)) return;
-  const sib = S.children(p).filter((x) => !list.includes(x));
-  const first = S.children(p).indexOf(list[0]);
-  const keptBefore = S.children(p).slice(0, first).filter((x) => !list.includes(x)).length;
+  const all = S.children(p).filter((x) => list.includes(x) || visible(x));
+  const sib = all.filter((x) => !list.includes(x));
+  const first = all.indexOf(list[0]);
+  const keptBefore = all.slice(0, first).filter((x) => !list.includes(x)).length;
   const ni = keptBefore + (dir < 0 ? -1 : 1);
   O.tx('Move', () => {
     if (ni < 0 || ni > sib.length) {
@@ -182,14 +190,18 @@ export function moveBy(dir, ids = target()) {
     }
   }, { ctx: ctx() });
 }
+/** Move ids into parent at `index`, counted among the parent's children that are NOT being moved. */
 export function moveTo(ids, parent, index) {
   const list = tops(ids).filter((id) => S.canMove(id, parent));
   if (!list.length) return false;
+  const kept = S.children(parent).filter((c) => !list.includes(c));
+  const i = index == null ? kept.length : Math.max(0, Math.min(index, kept.length));
   O.tx('Move', () => {
-    let i = index == null ? S.children(parent).length : index;
+    let a = kept[i - 1] || null;
+    const b = kept[i] || null;
     for (const id of list) {
-      O.set(id, { pos: S.posAt(parent, i, id, S.parentOf(id)) });
-      i = S.children(parent).indexOf(id) + 1;
+      O.set(id, { pos: S.posBetween(parent, a, b, S.parentOf(id)) });
+      a = id;
     }
   }, { ctx: ctx() });
   return true;
@@ -232,8 +244,11 @@ export function nudge(days, ids = target()) {
   O.tx('Reschedule', () => {
     for (const id of ids) {
       const w = S.val(id, 'when');
-      const base = w && w >= today() ? w : today();
-      O.set(id, { when: addDays(base, w ? days : Math.max(0, days - (days > 0 ? 1 : 0))), someday: false });
+      const t = today();
+      const base = w && w >= t ? w : t;
+      let next = addDays(base, w ? days : Math.max(0, days - (days > 0 ? 1 : 0)));
+      if (next < t) next = t; // never schedule into the past (audit S3-9)
+      O.set(id, { when: next, someday: false });
     }
   }, { ctx: ctx(), merge: 'nudge:' + ids.join() });
 }
@@ -282,7 +297,7 @@ export function parseOutline(text) {
   }
   return items;
 }
-export function pasteOutline(text, parent, index) {
+export function pasteOutline(text, parent, index, topFields = {}) {
   const items = parseOutline(text);
   if (!items.length) return [];
   const ids = [];
@@ -292,7 +307,7 @@ export function pasteOutline(text, parent, index) {
       const lvl = Math.min(it.level, parents.length - 1);
       parents.length = lvl + 1; idx.length = lvl + 1;
       const p = parents[lvl];
-      const id = O.create({ title: it.title, done: it.done, doneAt: it.done ? Date.now() : null, pos: S.posAt(p, idx[lvl]) });
+      const id = O.create({ title: it.title, done: it.done, doneAt: it.done ? Date.now() : null, pos: S.posAt(p, idx[lvl]), ...(lvl === 0 ? topFields : {}) });
       idx[lvl] = S.children(p).indexOf(id) + 1;
       parents.push(id); idx.push(0);
       ids.push(id);

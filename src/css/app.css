@@ -87,6 +87,8 @@ kbd { font: 560 11.5px/18px var(--font); font-variant-numeric: tabular-nums; col
 .nojs { padding: 40px; color: var(--ink-2); }
 
 /* ---------------- shell ---------------- */
+.banner { position: sticky; top: 0; z-index: 80; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 10px 16px; background: color-mix(in oklch, var(--red) 12%, var(--paper)); color: var(--ink); font-size: 13.5px; border-bottom: 1px solid color-mix(in oklch, var(--red) 30%, transparent); }
+.banner button { font-weight: 600; color: var(--red); text-decoration: underline; text-underline-offset: 3px; }
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr); min-height: 100svh; }
 .side { position: sticky; top: 0; height: 100svh; display: flex; flex-direction: column; gap: 2px; padding: 14px 10px 10px; background: var(--sunk); border-right: 1px solid var(--rule); overflow-y: auto; overscroll-behavior: contain; }
 .side-head { display: flex; align-items: center; gap: 8px; padding: 2px 6px 12px 8px; }
@@ -126,7 +128,7 @@ kbd { font: 560 11.5px/18px var(--font); font-variant-numeric: tabular-nums; col
 .scrim-side, .bar, .menu, .more { display: none; }
 
 /* ---------------- page ---------------- */
-.main { min-width: 0; }
+.main { min-width: 0; position: relative; isolation: isolate; }
 .sheet { position: relative; max-width: 760px; margin: 0 auto; padding: 52px 40px 0; }
 .page-head { position: relative; padding: 0 0 18px 0; margin-left: calc(var(--tw-w) + var(--ck) + 12px - var(--tw-w) - var(--ck) - 12px); }
 .crumbs { display: flex; flex-wrap: wrap; gap: 2px 0; font-size: 13px; color: var(--ink-2); margin-bottom: 6px; min-height: 0; }

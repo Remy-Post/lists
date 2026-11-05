@@ -12,7 +12,16 @@ import { ui } from './ui.js';
 const after = (fn) => (...a) => { const r = fn(...a); renderPage({ flip: true }); renderSide(); return r; };
 const sel = () => A.targets();
 const needSel = () => sel().length > 0;
-const keepFocus = (fn) => () => { const id = st.cursor; fn(); renderPage({ flip: true }); renderSide(); if (id && rowEl(id)) focusRow(id, { keepSel: true, instant: true }); };
+const keepFocus = (fn) => () => {
+  const id = st.cursor;
+  const r = fn();
+  if (r === false) return false; // nothing happened: let the key through (e.g. Tab)
+  renderPage({ flip: true }); renderSide();
+  if (id && rowEl(id)) focusRow(id, { keepSel: true, instant: true });
+  return r;
+};
+/** Commands that make sense wherever focus is (sidebar buttons, body). */
+const GLOBAL = new Set(['quick', 'palette', 'help', 'undo', 'redo', 'sync', 'settings', 'showdone', 'g-inbox', 'g-today', 'g-up', 'g-some', 'g-log', 'g-trash', 'esc']);
 
 /** group: shown in the ? sheet. when: 'nav' (a row is focused, not typing) | 'any'. */
 export const commands = [
@@ -155,6 +164,8 @@ export function wireKeys() {
     const inRow = typing && t.classList && t.classList.contains('tx');
     if (ui.modalOpen() && !['Mod+k', 'Escape'].includes(combo(e))) return;
     const c = combo(e);
+    // Focus on a control outside the list (sidebar link, button): keep its native keys (audit S2-3).
+    const outside = !typing && t && t !== document.body && !(t.closest && t.closest('#outline'));
     // While typing, only modified chords (and Escape) reach the registry.
     if (typing) {
       if (!(c.startsWith('Mod+') || c.startsWith('Alt+') || c === 'Escape')) return;
@@ -169,10 +180,11 @@ export function wireKeys() {
     for (const cmd of commands) {
       if (!cmd.keys.includes(key)) continue;
       if (cmd.when === 'nav' && typing) continue;
+      if (outside && !GLOBAL.has(cmd.id)) continue;
       if (cmd.test && !cmd.test()) continue;
-      e.preventDefault();
-      if (inRow && cmd.id !== 'undo' && cmd.id !== 'redo' && cmd.id !== 'esc') { const id = st.cursor; if (['up', 'down', 'heading', 'prio', 'today', 'evening', 'someday', 'nudge+', 'nudge-', 'week+', 'week-'].includes(cmd.id)) { structural.keepCaret(id, () => runRaw(cmd)); return; } }
-      cmd.run();
+      if (inRow && cmd.id !== 'undo' && cmd.id !== 'redo' && cmd.id !== 'esc') { e.preventDefault(); const id = st.cursor; if (['up', 'down', 'heading', 'prio', 'today', 'evening', 'someday', 'nudge+', 'nudge-', 'week+', 'week-'].includes(cmd.id)) { structural.keepCaret(id, () => runRaw(cmd)); return; } }
+      const r = cmd.run();
+      if (r !== false) e.preventDefault();
       return;
     }
   });

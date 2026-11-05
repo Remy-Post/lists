@@ -56,6 +56,8 @@ export function focusRow(id, o = {}) {
   const el = rowEl(id);
   if (!el) return;
   el.classList.add('cur');
+  if (prev && prev !== el) prev.tabIndex = -1;
+  el.tabIndex = 0;
   if (o.edit) {
     el._tx.focus({ preventScroll: true });
     setCaret(el._tx, o.caret ?? 'end');
@@ -115,17 +117,21 @@ function enter(id, tx, shift) {
   if (document.activeElement !== tx) tx.textContent = S.val(id, 'title');
   focusRow(nid, { edit: true, caret: 0 });
 }
+/** Anything besides a title worth keeping? Then Backspace must not destroy it (audit S1-4). */
+const hasContent = (id) => !!(S.val(id, 'notes') || S.val(id, 'when') || S.val(id, 'deadline') || S.val(id, 'rrule') || S.val(id, 'someday') || (S.val(id, 'tags') || []).length || S.val(id, 'priority'));
 function backspaceAtStart(id, tx) {
   const text = tx.textContent;
   const prev = neighbour(id, -1);
   if (!text) {
     if (S.hasChildren(id)) return false;
-    O.tx('Delete', () => O.set(id, { deleted: 'void' }), { ctx: { route: { ...st.route }, sel: id } });
+    const keep = hasContent(id) && !st.fresh.has(id);
+    O.tx('Delete', () => O.set(id, keep ? { deleted: 'trash', deletedAt: Date.now() } : { deleted: 'void' }), { ctx: { route: { ...st.route }, sel: id } });
+    if (keep) ui.toast('Moved to Trash', { undo: true });
     renderPage({ flip: true });
     if (prev) focusRow(prev, { edit: true, caret: 'end' }); else focusRow(st.rows[0], { edit: true, caret: 0 });
     return true;
   }
-  if (!prev || S.hasChildren(id) || S.val(prev, 'kind') !== 'item') return false;
+  if (!prev || S.hasChildren(id) || S.val(prev, 'kind') !== 'item' || hasContent(id)) return false;
   const pt = S.val(prev, 'title');
   O.tx('Join', () => { O.set(prev, { title: pt + text }); O.set(id, { deleted: 'void' }); }, { ctx: { route: { ...st.route }, sel: prev } });
   renderPage({ flip: true });
@@ -148,8 +154,13 @@ function vertical(id, tx, dir) {
     if (node && el._tx.contains(node)) { const s = getSelection(); s.removeAllRanges(); const rr = document.createRange(); rr.setStart(node, off); s.addRange(rr); placed = true; }
   }
   if (!placed) setCaret(el._tx, dir < 0 ? 'end' : 0);
-  focusRow(target, { keepSel: false, edit: false, scroll: true });
-  st.mode = 'edit';
+  // Keep focus in the text (audit S2-2): update cursor and selection without focusing the row.
+  const prevEl = st.cursor && rowEl(st.cursor);
+  if (prevEl) prevEl.classList.remove('cur');
+  st.cursor = target; st.sel = new Set([target]); st.anchor = target; st.mode = 'edit';
+  el.classList.add('cur'); paintSel();
+  el.scrollIntoView({ block: 'nearest' });
+  ui.follow(target);
   return true;
 }
 /** Re-focus a row's title after a structural change, keeping the caret. */
@@ -245,8 +256,11 @@ export function wire() {
       e.preventDefault();
       const p = S.parentOf(id), i = S.children(p).indexOf(id);
       const empty = !tx.textContent;
+      const smart = st.route.view !== 'node' && st.route.view !== 'inbox';
+      const top = smart ? { ...(A.defaultTarget().fields || {}) } : {};
+      if (smart) for (const k of ['when', 'evening', 'someday']) if (S.val(id, k)) top[k] = S.val(id, k);
       const ids = O.tx('Paste', () => {
-        const out = A.pasteOutline(text, p, i + 1);
+        const out = A.pasteOutline(text, p, i + 1, top);
         if (empty) O.set(id, { deleted: 'void' });
         return out;
       });
@@ -267,7 +281,7 @@ export function wire() {
     if (row._swiped) { row._swiped = false; return; }
     if (e.target.closest('.ck')) {
       e.preventDefault();
-      if (st.route.view === 'trash') return;
+      if (st.route.view === 'trash' || S.val(id, 'kind') === 'log') return; // repeat logs are a record, not a task
       haptic(8);
       A.toggleDone(st.sel.has(id) && st.sel.size > 1 ? [...st.sel] : [id]);
       return;

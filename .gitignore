@@ -4,3 +4,5 @@ tests/visual/out/
 tests/e2e/out/
 *.log
 .DS_Store
+.release/
+.check/

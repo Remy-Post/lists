@@ -4,7 +4,7 @@ import * as O from './ops.js';
 import * as A from './actions.js';
 import * as DB from './db.js';
 import { st, $, MOD } from './state.js';
-import { renderPage, renderSide, rowEl, transition, dayChanged } from './view.js';
+import { renderPage, renderSide, rowEl, transition, dayChanged, refillRow } from './view.js';
 import { wire, focusRow } from './input.js';
 import { wireKeys } from './keys.js';
 import { wireGestures } from './gesture.js';
@@ -15,15 +15,25 @@ const VERSION = typeof LISTS_BUILD === 'string' ? LISTS_BUILD : 'dev';
 window.LISTS_VERSION = VERSION;
 
 /* ---------------- persistence ---------------- */
+// Every write (local edit or merged remote change) is mirrored to other open tabs, which merge it
+// per field without re-broadcasting. The disk write itself also merges (db.js), so a stale tab
+// can never clobber newer fields (docs/audits/02-code-audit.md S1-3).
 const bc = 'BroadcastChannel' in self ? new BroadcastChannel('lists') : null;
-let quiet = false;
+let quiet = false, inbox = [];
 S.onPersist((rec, local) => {
   DB.put(rec, local);
-  if (local && bc && !quiet) bc.postMessage({ t: 'rec', r: rec });
+  if (bc && !quiet) bc.postMessage({ t: 'rec', r: rec });
+  if (local) maybeSync('edit');
 });
+const mergeQuiet = (list) => { quiet = true; try { S.mergeRemote(list); } finally { quiet = false; } };
 if (bc) bc.onmessage = (e) => {
-  if (e.data && e.data.t === 'rec') { quiet = true; S.mergeRemote([e.data.r]); quiet = false; }
+  const d = e.data;
+  if (!d) return;
+  if (d.t === 'rec') { if (!inbox.length) queueMicrotask(() => mergeQuiet(inbox.splice(0))); inbox.push(d.r); }
+  else if (d.t === 'meta') DB.mirrorMeta(d.k, d.v);
 };
+DB.onMeta((k, v) => { if (bc && k.startsWith('sync.')) bc.postMessage({ t: 'meta', k, v }); });
+DB.onDiskNewer((list) => mergeQuiet(list));
 
 /* ---------------- render scheduling ---------------- */
 let raf = 0, flipNext = false;
@@ -37,7 +47,14 @@ function schedule(flip) {
     checkCleared();
   });
 }
-S.subscribe((ids, structural) => schedule(structural));
+// Typing in a row changes only that row's title: refill it alone instead of re-rendering the page.
+S.subscribe((ids, structural, fields) => {
+  if (!structural && fields && ids.size === 1 && [...fields].every((f) => f === 'title' || f === 'notes')) {
+    const id = [...ids][0];
+    if (rowEl(id) && rowEl(id).isConnected) { refillRow(id); if (S.parentOf(id) === S.ROOT) renderSide(); return; }
+  }
+  schedule(structural);
+});
 
 /* ---------------- routing ---------------- */
 const VIEWS = ['inbox', 'today', 'upcoming', 'someday', 'logbook', 'trash'];
@@ -61,6 +78,7 @@ function show(r, kind, fromRow) {
   const shallower = prev.view === 'node' && (r.view !== 'node' || S.ancestors(prev.id).includes(r.id));
   const doRender = () => { renderPage(); renderSide(); };
   if (same) { doRender(); return; }
+  if (r.view !== 'today' && light) { light.destroy(); light = null; }
   // Zoom: the row's title becomes the page title (a shared-element View Transition).
   const t = fromRow && fromRow.querySelector('.tx');
   if (t && kind === 'pointer') t.style.viewTransitionName = 'ztitle';
@@ -93,6 +111,7 @@ function setupSync() {
       applyRemote: async (recs) => { S.mergeRemote(recs); await DB.flush(); },
       getMeta: async (k) => DB.getMeta('sync.' + k),
       setMeta: async (k, v) => { DB.setMeta('sync.' + k, v); },
+      requeueAll: () => requeueAll(),
     },
     onStatus: (s) => { syncStatus = s; paintSync(); },
   });
@@ -110,18 +129,37 @@ ui.syncState = () => syncStatus;
 ui.syncNow = async () => {
   if (!sync || syncStatus.state === 'unpaired') { ui.settings(); return; }
   ui.toast('Syncing…', { ms: 1200 });
-  try { await sync.syncNow(); ui.toast('Synced'); } catch { ui.toast('Sync failed. It will retry on a good connection.'); }
+  const ok = await sync.syncNow().catch(() => false);
+  ui.toast(ok ? 'Synced' : navigator.onLine ? 'Sync failed. It will retry on a good connection.' : 'You’re offline. Changes are saved here and will sync later.');
 };
-ui.createVault = async () => { const c = await sync.createVault(); await sync.syncNow().catch(() => {}); return c; };
-ui.join = async (code) => { await sync.join(code.trim()); await sync.syncNow(); };
-ui.unpair = () => sync.unpair();
+const requeueAll = () => DB.requeueAll([...S.recs.keys()].filter((id) => id !== S.ROOT));
+ui.createVault = async () => { await requeueAll(); const c = await sync.createVault(); await sync.syncNow().catch(() => {}); return c; };
+ui.join = async (code) => {
+  dropUntouchedTour();
+  await requeueAll();
+  await sync.join(code.trim());
+  await sync.syncNow();
+};
+ui.unpair = async () => { await sync.unpair(); await requeueAll(); };
+/** A device being paired shouldn't push its untouched tour into the account (audit S2-9). */
+function dropUntouchedTour() {
+  const tour = new Set(DB.getMeta('tourIds') || []);
+  if (!tour.size) return;
+  const others = [...S.recs.keys()].filter((id) => id !== S.ROOT && id !== S.INBOX && !tour.has(id) && S.isLive(id));
+  if (others.length) return;
+  for (const id of tour) if (S.recs.has(id)) S.patch(id, { deleted: 'void' });
+}
 ui.pairingCode = () => (sync ? sync.pairingCode() : null);
 async function pairFromLink(code) {
   history.replaceState(null, '', '#/today'); // the key must not linger in history
+  try { sessionStorage.setItem('lists.pair', code); } catch {} // survives a reload until join resolves
   show({ view: 'today' }, 'key');
-  if (await ui.pairingCode()) { ui.toast('This device is already paired'); return; }
+  if (await ui.pairingCode()) { ui.toast('This device is already paired'); clearPending(); return; }
   try { await ui.join(code); ui.toast('Paired. Your lists are syncing.'); } catch { ui.toast('That pairing link didn’t work'); }
+  clearPending();
 }
+const clearPending = () => { try { sessionStorage.removeItem('lists.pair'); } catch {} };
+const pendingPair = () => { try { return sessionStorage.getItem('lists.pair'); } catch { return null; } };
 const maybeSync = (why) => { try { sync && sync.maybeSync(why); } catch {} };
 
 /* ---------------- the moment: Today, struck through ---------------- */
@@ -137,6 +175,7 @@ function checkCleared(force) {
   wasOpen = open;
 }
 ui.afterDone = () => {};
+let light = null;
 async function celebrate() {
   const today = A.today();
   if (DB.getMeta('clearedOn') === today && !location.hash.includes('debug')) return;
@@ -146,10 +185,10 @@ async function celebrate() {
     const gl = await import('./gl.js');
     if (!(await gl.supportedAsync())) return;
     const host = $('#main');
-    const fx = gl.strikeLight(host, { theme: document.documentElement.dataset.theme === 'graphite' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light' });
+    if (light) light.destroy();
+    const fx = light = gl.strikeLight(host, { theme: document.documentElement.dataset.theme === 'graphite' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light' });
     await fx.sweep();
-    const stop = () => { fx.destroy(); removeEventListener('hashchange', stop); };
-    addEventListener('hashchange', stop);
+    if (st.route.view !== 'today' && light === fx) { fx.destroy(); light = null; }
   } catch {}
 }
 
@@ -170,19 +209,23 @@ function tutorial() {
     [`Type “tomorrow” or “every monday” in a new item and it becomes a date. Press ${MOD === '⌘' ? '⌘K' : 'Ctrl+K'} for every command`, []],
     ['Complete them all and see what Today looks like when it’s clear', []],
   ];
+  const ids = [];
   O.tx('Tour', () => {
     lines.forEach(([title, kids]) => {
       const id = O.create({ title, when: t, pos: S.posAt(S.INBOX, S.children(S.INBOX).length) });
+      ids.push(id);
       let p = id;
       const add = (arr) => {
         for (const k of arr) {
           if (Array.isArray(k)) { add(k); continue; }
           p = O.create({ title: k, pos: S.posAt(p, S.children(p).length) });
+          ids.push(p);
         }
       };
       add(kids);
     });
   });
+  DB.setMeta('tourIds', ids);
   ui.go({ view: 'today' }, 'key');
 }
 ui.tutorial = tutorial;
@@ -250,7 +293,29 @@ function wireLifecycle() {
   // Ask for persistent storage after the first meaningful edit.
   O.setOnChange(() => { if (!asked) { asked = true; DB.askPersist(); } });
 }
-let asked = false;
+let asked = false, storageBroken = false;
+/** Never let the user work on unaware that nothing is being saved (audit S1-5). */
+function watchStorage() {
+  let since = 0, shown = false;
+  const warn = () => {
+    if (shown) return;
+    shown = true;
+    const b = document.createElement('div');
+    b.className = 'banner';
+    b.setAttribute('role', 'alert');
+    b.textContent = 'This browser isn’t letting Lists save. Changes will be lost when you close the tab. ';
+    const x = document.createElement('button');
+    x.textContent = 'Export a copy';
+    x.addEventListener('click', () => ui.exportJson());
+    b.append(x);
+    document.body.prepend(b);
+  };
+  if (storageBroken) return warn();
+  setInterval(() => {
+    if (DB.lastError && DB.pendingCount() > 0) { since ||= Date.now(); if (Date.now() - since > 5000) warn(); }
+    else since = 0;
+  }, 1000);
+}
 
 /* ---------------- service worker ---------------- */
 function registerSW() {
@@ -262,8 +327,10 @@ function registerSW() {
     if (reg.waiting && navigator.serviceWorker.controller) ui.toast('An update is ready', { action: { label: 'Reload', run: () => reg.waiting.postMessage('skip') }, ms: 10000 });
     reg.addEventListener('updatefound', () => reg.installing && onReady(reg.installing));
   }).catch(() => {});
+  // Reload only when an existing worker was replaced (an update), never on the first install's claim.
+  const hadController = !!navigator.serviceWorker.controller;
   let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded) { reloaded = true; DB.flush().then(() => location.reload()); } });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; DB.flush().then(() => location.reload()); } });
 }
 
 /* ---------------- boot ---------------- */
@@ -276,7 +343,7 @@ async function boot() {
     S.setDevice(dev);
     S.hydrate(nodes);
   } catch (e) {
-    document.body.classList.add('nodb');
+    storageBroken = true;
     console.error('Storage unavailable', e);
   }
   st.collapsed = new Set(DB.getMeta('collapsed') || []);
@@ -285,10 +352,12 @@ async function boot() {
   setupSync();
   wire(); wireKeys(); wireGestures(); wireChrome(); wireLifecycle();
   const r = parseHash();
-  if (r.pair) { show({ view: 'today' }, 'key'); pairFromLink(r.pair); }
+  const pair = r.pair || pendingPair();
+  if (pair) { show({ view: 'today' }, 'key'); pairFromLink(pair); }
   else show(r.view ? r : { view: 'today' }, 'key');
   if (r.debug === 'clear') setTimeout(() => checkCleared(true), 300);
-  if (first && !DB.getMeta('toured')) { DB.setMeta('toured', 1); tutorial(); }
+  if (first && !pair && !storageBroken && !DB.getMeta('toured')) { DB.setMeta('toured', 1); tutorial(); }
+  watchStorage();
   const theme = (() => { try { return localStorage.getItem('lists.theme'); } catch { return null; } })();
   ui.setTheme(theme || 'system');
   document.body.classList.add('ready');

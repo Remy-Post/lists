@@ -154,7 +154,7 @@ export function createSync({
         }
         const res = await post(tok, { dev: st.dev, since: st.cursor || 0, push, ...(st.mk && { create: true }) });
         ok++;
-        if (res.reset) { st.cursor = 0, more = 1; await save(); continue; }
+        if (res.reset) { st.cursor = 0, more = 1; await save(); if (db.requeueAll) await db.requeueAll(); continue; }
         const got = [];
         for (const row of res.rows) try { got.push(await unseal(key, row)); } catch { bad++; }
         if (got.length) await db.applyRemote(got);

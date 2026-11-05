@@ -62,14 +62,14 @@ for (const theme of ['light', 'dark']) {
   page.on('pageerror', (e) => problems.push(`${theme} pageerror: ${e.message}`));
   // Virtual clock: rAF and performance.now only advance through window.__tick(ms), in 16 ms frames.
   await page.addInitScript((STEP) => {
-    let T = 0, id = 0;
+    let T = 0, E = 0, id = 0;
     const q = new Map();
     window.__raf = 0;
     performance.now = () => T;
     window.requestAnimationFrame = (f) => (window.__raf++, q.set(++id, f), id);
     window.cancelAnimationFrame = (i) => q.delete(i);
     window.__tick = (ms) => {
-      for (const end = T + ms; T + STEP <= end;) {
+      for (E += ms; T + STEP <= E;) {
         T += STEP;
         const cbs = [...q.values()]; q.clear();
         for (const f of cbs) f(T);
@@ -91,7 +91,7 @@ for (const theme of ['light', 'dark']) {
   let now = 0;
   const at = async (ms) => { const d = Math.max(16, ms - now); await page.evaluate((d) => window.__tick(d), d); now += d; };
   for (const ms of QUICK ? [300] : [0, 300, 600, 900]) {
-    await at(ms + STEP + 1); // the first rAF after sweep() is the t = 0 frame
+    await at(ms + STEP + (ms && STEP - 1)); // first rAF after sweep() is t = 0; then the first frame at or after ms
     const b = await shot(`t${String(ms).padStart(4, '0')}`);
     await writeFile(join(OUT, `${theme}-t${String(ms).padStart(4, '0')}-diff.png`), await diff(page, bare, b));
     console.log(theme, `t=${ms}`, await page.evaluate(() => window.__stats));
@@ -132,7 +132,7 @@ for (const theme of ['light', 'dark']) {
     return { before: e0, lost: g.isContextLost() };
   });
   await at(now + 100);
-  await page.evaluate(() => window.__gl.sweep());
+  await page.evaluate(() => { window.__gl.sweep(); }); // don't await: time only moves via __tick
   await at(now + 600);
   const glErr2 = await page.evaluate(() => window.__gl.canvas().getContext('webgl2').getError());
   await shot('after-restore');

@@ -51,7 +51,11 @@ export function put(rec, toOutbox) {
   if (toOutbox) qOut.add(rec.id);
   schedule();
 }
-export function setMeta(k, v) { metaCache.set(k, v); qMeta.set(k, v); schedule(); }
+let metaHook = null;
+export const onMeta = (fn) => { metaHook = fn; };
+export function setMeta(k, v, fromPeer) { metaCache.set(k, v); qMeta.set(k, v); schedule(); if (!fromPeer && metaHook) metaHook(k, v); }
+/** A peer tab already wrote this meta value; just mirror it in memory. */
+export const mirrorMeta = (k, v) => { metaCache.set(k, v); };
 export const getMeta = (k) => metaCache.get(k);
 
 function schedule() { if (!timer) timer = setTimeout(flush, BATCH); }
@@ -68,13 +72,28 @@ export function flush() {
     const db = await open();
     const tx = db.transaction(['nodes', 'outbox', 'meta'], 'readwrite', { durability: 'strict' });
     const n = tx.objectStore('nodes'), o = tx.objectStore('outbox'), m = tx.objectStore('meta');
-    // structuredClone-free: records are plain JSON already
-    for (const r of recs) n.put(r);
-    for (const id of out) { const r = recs.find((x) => x.id === id); o.put(r ? r.v : '', id); }
+    // Merge per field with what is on disk, so a tab holding a stale copy can never
+    // overwrite newer fields another tab wrote (docs/audits/02-code-audit.md S1-3).
+    for (const r of recs) {
+      const g = n.get(r.id);
+      g.onsuccess = () => {
+        const cur = g.result;
+        if (!cur || !cur.f) { n.put(r); return; }
+        const f = { ...r.f };
+        let newer = false;
+        for (const k in cur.f) if (!f[k] || cur.f[k][1] > f[k][1]) { f[k] = cur.f[k]; newer = true; }
+        if (!newer) { n.put(r); return; }
+        const v = Object.values(f).reduce((m, e) => (e[1] > m ? e[1] : m), '');
+        n.put({ id: r.id, f, v });
+        mergedBack.push({ id: r.id, f, v });
+      };
+    }
+    const byId = new Map(recs.map((r) => [r.id, r]));
+    for (const id of out) { const r = byId.get(id); o.put(r ? r.v : '', id); }
     for (const [k, v] of meta) m.put(v, k);
-    if (tx.commit) tx.commit();
     await done(tx);
     writes++;
+    if (mergedBack.length && onMergedBack) onMergedBack(mergedBack.splice(0));
   })().catch((e) => {
     // Put the batch back so nothing is lost, and retry shortly.
     for (const r of recs) if (!q.has(r.id)) q.set(r.id, r);
@@ -85,6 +104,10 @@ export function flush() {
   return inflight;
 }
 export let writes = 0, lastError = null;
+const mergedBack = [];
+let onMergedBack = null;
+/** Called with records whose on-disk copy had newer fields than memory (another tab wrote them). */
+export const onDiskNewer = (fn) => { onMergedBack = fn; };
 export const pendingCount = () => q.size + qMeta.size;
 
 /** Records whose latest local version hasn't been acknowledged by the server. */
@@ -93,6 +116,15 @@ export async function getOutbox(recById) {
   const db = await open();
   const ids = await req(db.transaction('outbox').objectStore('outbox').getAllKeys());
   return ids.map(recById).filter(Boolean).map((r) => JSON.parse(JSON.stringify(r)));
+}
+/** Put every record in the outbox (new vault, rejoin, or a server reset): the server must get everything. */
+export async function requeueAll(ids) {
+  await flush();
+  const db = await open();
+  const tx = db.transaction('outbox', 'readwrite');
+  const o = tx.objectStore('outbox');
+  for (const id of ids) o.put('', id);
+  await done(tx);
 }
 /** Drop outbox entries, but only those whose version is unchanged since they were sent. */
 export async function ackOutbox(sent, recById) {
