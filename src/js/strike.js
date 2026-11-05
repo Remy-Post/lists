@@ -34,41 +34,41 @@ export function strikePath(seed, w, y) {
 }
 
 const NS = 'http://www.w3.org/2000/svg';
-/**
- * Draw (or redraw) strikes over `textEl`, one per rendered line.
- * `host` must be position:relative and contain textEl. Returns the svg.
- */
-export function drawStrike(host, textEl, seed, animate) {
-  let svg = host.querySelector(':scope > svg.strike');
+/** Read phase: one stroke box per rendered line of `textEl`, relative to `host`. No writes. */
+export function measureStrike(host, textEl) {
   const hb = host.getBoundingClientRect();
+  if (!hb.width) return null; // not laid out (offscreen with content-visibility)
   const range = document.createRange();
   range.selectNodeContents(textEl);
-  const rects = [...range.getClientRects()].filter((q) => q.width > 2);
-  if (!rects.length) { if (svg) svg.remove(); return null; }
-  // Merge rects on the same line (inline fragments).
   const lines = [];
-  for (const q of rects) {
+  for (const q of range.getClientRects()) {
+    if (q.width <= 2) continue;
     const l = lines.find((x) => Math.abs(x.top - q.top) < 4);
     if (l) { l.left = Math.min(l.left, q.left); l.right = Math.max(l.right, q.right); }
     else lines.push({ top: q.top, bottom: q.bottom, left: q.left, right: q.right });
   }
+  return { w: hb.width, h: hb.height, lines: lines.map((l) => ({ y: (l.top + l.bottom) / 2 - hb.top + 0.5, x: l.left - hb.left, w: l.right - l.left })) };
+}
+/** Write phase: draw the strokes from a measurement. animate: false | 'full' | 'fast'. */
+export function paintStrike(host, geo, seed, animate) {
+  let svg = host.querySelector(':scope > svg.strike');
+  if (!geo || !geo.lines.length) { if (svg) svg.remove(); return null; }
   if (!svg) {
     svg = document.createElementNS(NS, 'svg');
     svg.setAttribute('class', 'strike');
     svg.setAttribute('aria-hidden', 'true');
     host.appendChild(svg);
   }
-  svg.setAttribute('width', Math.ceil(hb.width + 12));
-  svg.setAttribute('height', Math.ceil(hb.height));
+  svg.setAttribute('width', Math.ceil(geo.w + 12));
+  svg.setAttribute('height', Math.ceil(geo.h));
   svg.replaceChildren();
-  lines.forEach((l, i) => {
+  geo.lines.forEach((l, i) => {
     const p = document.createElementNS(NS, 'path');
-    const y = (l.top + l.bottom) / 2 - hb.top + 0.5;
-    p.setAttribute('d', strikePath(seed + i, l.right - l.left, y));
-    p.setAttribute('transform', `translate(${(l.left - hb.left).toFixed(1)} 0)`);
+    p.setAttribute('d', strikePath(seed + i, l.w, l.y));
+    p.setAttribute('transform', `translate(${l.x.toFixed(1)} 0)`);
     svg.appendChild(p);
     if (animate) {
-      const len = p.getTotalLength();
+      const len = l.w + 12; // close enough to the path length, without a layout-forcing getTotalLength()
       p.style.strokeDasharray = len;
       p.style.strokeDashoffset = len;
       p.animate([{ strokeDashoffset: len }, { strokeDashoffset: 0 }], {
@@ -79,3 +79,5 @@ export function drawStrike(host, textEl, seed, animate) {
   });
   return svg;
 }
+/** Measure and paint one row (convenience). */
+export function drawStrike(host, textEl, seed, animate) { return paintStrike(host, measureStrike(host, textEl), seed, animate); }

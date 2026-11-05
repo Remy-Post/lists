@@ -5,7 +5,7 @@ import { st, $, h, pageRoot } from './state.js';
 import { formatDay as fmtDay, describeRRule, fromYMD } from './parse.js';
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const formatDay = (d, now) => { if (!YMD.test(String(d))) return ''; try { return fmtDay(d, now); } catch { return ''; } };
-import { drawStrike } from './strike.js';
+import { measureStrike, paintStrike } from './strike.js';
 import { today } from './actions.js';
 
 const CE = (() => { const d = document.createElement('div'); d.contentEditable = 'plaintext-only'; return d.contentEditable === 'plaintext-only' ? 'plaintext-only' : 'true'; })();
@@ -101,18 +101,21 @@ function dayLabel(d) {
 }
 
 /* ---------------- rows ---------------- */
+// Parsed once, cloned per row: innerHTML per row was the top cost of rendering long lists (QA perf).
+let rowTpl = null;
 function makeRow(id) {
-  const el = h('div', { class: 'row', role: 'treeitem', 'data-id': id, tabindex: '-1' });
-  el.innerHTML =
-    '<button class="tw" tabindex="-1" aria-hidden="true">' + ICON.chev + '</button>' +
-    '<button class="ck" tabindex="-1" role="checkbox" aria-checked="false" aria-label="Complete">' + ICON.check + '</button>' +
-    '<div class="bd"><div class="pa"></div><div class="tl"><span class="tx" spellcheck="true"></span></div><div class="nt"></div><div class="mt"></div></div>' +
-    '<button class="ct" tabindex="-1" aria-label="Open"></button>';
+  if (!rowTpl) {
+    rowTpl = document.createElement('template');
+    rowTpl.innerHTML = '<div class="row" role="treeitem" tabindex="-1">' +
+      '<button class="tw" tabindex="-1" aria-hidden="true">' + ICON.chev + '</button>' +
+      '<button class="ck" tabindex="-1" role="checkbox" aria-checked="false" aria-label="Complete">' + ICON.check + '</button>' +
+      '<div class="bd"><div class="pa"></div><div class="tl"><span class="tx" spellcheck="true" role="textbox" aria-label="Title" tabindex="-1"></span></div><div class="nt"></div><div class="mt"></div></div>' +
+      '<button class="ct" tabindex="-1" aria-label="Open"></button></div>';
+  }
+  const el = rowTpl.content.firstChild.cloneNode(true);
+  el.dataset.id = id;
   const tx = el.querySelector('.tx');
-  tx.contentEditable = CE;
-  tx.tabIndex = -1; // the row is the Tab stop (roving tabindex); Enter edits
-  tx.setAttribute('role', 'textbox');
-  tx.setAttribute('aria-label', 'Title');
+  tx.contentEditable = CE; // the row is the Tab stop (roving tabindex); Enter edits
   el._tx = tx;
   return el;
 }
@@ -186,9 +189,9 @@ export function fillRow(el, id, m, smart) {
   const n = kidsN ? S.countOpen(id) : 0;
   ct.textContent = kidsN ? (n ? String(n) : '✓') : '';
   ct.hidden = !kidsN;
-  // strike bookkeeping
-  if (done && !el._done) el._strikeQ = el._done === undefined ? 'static' : 'anim';
-  if (!done && el._done) { el._strikeQ = null; const s = el.querySelector('.tl > svg.strike'); if (s) s.remove(); }
+  // strike bookkeeping: new done rows draw when they scroll into view; a fresh completion draws now.
+  if (done && !el._done) { if (el._done === undefined) { el._strikeQ = 'static'; strikeIO.observe(el); } else { el._strikeQ = 'anim'; strikeDirty.add(id); } }
+  if (!done && el._done) { el._strikeQ = null; const sv = el.querySelector('.tl > svg.strike'); if (sv) sv.remove(); }
   el._done = !!done;
 }
 /** Re-fill one rendered row in place (the typing fast path). */
@@ -196,31 +199,47 @@ export function refillRow(id) {
   const el = els.get(id), m = st.info.get(id);
   if (!el || !m) return;
   fillRow(el, id, m, st.route.view !== 'node' && st.route.view !== 'inbox');
-  queueStrikes();
+  if (el._done) { strikeDirty.add(id); queueStrikes(); }
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const safeDescribe = (r) => { try { return describeRRule(r); } catch { return 'Repeats'; } };
 
+/* Strikes: rows queue themselves (strikeDirty) or wait to scroll into view (strikeIO). Every flush is
+   two strict phases, all reads then all writes, so a long list never thrashes layout (QA perf). */
+const strikeDirty = new Set();
+const strikeIO = new IntersectionObserver((entries) => {
+  let any = false;
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    strikeIO.unobserve(e.target);
+    const id = e.target.dataset.id;
+    if (id && els.get(id) === e.target) { strikeDirty.add(id); any = true; }
+  }
+  if (any) queueStrikes();
+}, { rootMargin: '300px 0px' });
 function flushStrikes() {
-  // Read every width first, then draw: no read/write interleaving (audit S3-3).
+  const ids = [...strikeDirty];
+  strikeDirty.clear();
   const work = [];
-  for (const [id, el] of els) if (el._done && el.isConnected && el._tx) work.push([id, el, el._tx.getBoundingClientRect().width]);
-  for (const [id, el, w] of work) {
+  for (const id of ids) {
+    const el = els.get(id);
+    if (!el || !el.isConnected || !el._done) continue;
     const tl = el.querySelector('.tl');
-    if (el._strikeQ === 'anim') {
-      el._strikeQ = null;
-      // The pencil leads: measure the condensed title at once, draw the strike from t=0, and let the
-      // type settle under it (visual audit S2-2). Keyboard completion draws in 90 ms.
-      const tx = el._tx;
-      tx.style.transition = 'none';
-      el._sw = tx.getBoundingClientRect().width;
-      const fast = performance.now() - (st.keyAt || 0) < 400;
-      drawStrike(tl, tx, id, st.reduced ? false : fast ? 'fast' : 'full');
-      tx.style.transition = '';
-      if (!st.reduced && !fast) tx.animate([{ fontStretch: '100%' }, { fontStretch: '88%' }], { duration: 200, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
-    } else if (el._strikeQ === 'static' || (el._sw && Math.abs(el._sw - w) > 1) || !tl.querySelector('svg.strike')) {
-      el._strikeQ = null; el._sw = w;
-      drawStrike(tl, el._tx, id, false);
+    const anim = el._strikeQ === 'anim';
+    if (anim) el._tx.style.transition = 'none'; // measure the condensed title, not a mid-transition one
+    const geo = measureStrike(tl, el._tx);
+    if (!geo) { strikeIO.observe(el); continue; }
+    work.push([id, el, tl, geo, anim]);
+  }
+  const fast = performance.now() - (st.keyAt || 0) < 400;
+  for (const [id, el, tl, geo, anim] of work) {
+    el._strikeQ = null;
+    el._sw = geo.w;
+    // The pencil leads; on the keyboard path it draws in 90 ms (visual audit S2-2).
+    paintStrike(tl, geo, id, anim && !st.reduced ? (fast ? 'fast' : 'full') : false);
+    if (anim) {
+      el._tx.style.transition = '';
+      if (!st.reduced && !fast) el._tx.animate([{ fontStretch: '100%' }, { fontStretch: '88%' }], { duration: 200, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
     }
   }
 }
@@ -231,8 +250,8 @@ new ResizeObserver((e) => {
   const w = Math.round(e[0].contentRect.width);
   if (w === lastW) return; // only width changes can re-wrap titles
   lastW = w;
-  for (const el of els.values()) el._sw = -1;
-  queueStrikes();
+  // Titles may re-wrap: re-measure done rows as they come into view.
+  for (const el of els.values()) if (el._done) { strikeIO.unobserve(el); strikeIO.observe(el); }
 }).observe(document.documentElement);
 
 /* ---------------- reconcile + FLIP ---------------- */
@@ -268,21 +287,30 @@ function play(before) {
 
 /* ---------------- page ---------------- */
 let lastToday = '';
+// A fresh page paints its first rows at once and streams the rest in per-frame chunks, so opening a
+// 1,000-row list never blocks the main thread (QA perf gate: no long task > 50 ms).
+const FIRST = 90, CHUNK = 120;
+let chunkJob = 0;
 export function renderPage(opts = {}) {
   const r = st.route;
   const key = r.view + ':' + (r.id || '');
   const box = $('#outline');
+  if (chunkJob) { cancelAnimationFrame(chunkJob); chunkJob = 0; }
+  const fresh = key !== pageKey || !els.size;
   if (key !== pageKey) { els.clear(); box.replaceChildren(); pageKey = key; }
+  const pend = [];
   const before = opts.flip ? measure() : new Map();
   const active = document.activeElement;
   const nodes = [];
   st.rows = []; st.info.clear();
   const seen = new Set();
   const pushRow = (id, m, smart) => {
+    st.rows.push(id); st.info.set(id, m); seen.add(id);
     let el = els.get(id);
+    if (!el && fresh && st.rows.length > FIRST && !smart) { pend.push([id, m]); return; }
     if (!el) { el = makeRow(id); els.set(id, el); }
     fillRow(el, id, m, smart);
-    nodes.push(el); st.rows.push(id); st.info.set(id, m); seen.add(id);
+    nodes.push(el);
   };
   renderHead();
   if (r.view === 'node' || r.view === 'inbox') {
@@ -309,6 +337,16 @@ export function renderPage(opts = {}) {
   }
   for (const k of [...els.keys()]) if (!seen.has(k)) els.delete(k);
   reconcile(box, nodes);
+  if (pend.length) {
+    const step = () => {
+      const part = pend.splice(0, CHUNK), frag = document.createDocumentFragment();
+      for (const [id, m] of part) { const el = makeRow(id); els.set(id, el); fillRow(el, id, m, false); frag.append(el); }
+      box.append(frag);
+      chunkJob = pend.length ? requestAnimationFrame(step) : 0;
+      if (!pend.length) queueStrikes();
+    };
+    chunkJob = requestAnimationFrame(step);
+  }
   // Roving tabindex: exactly one row is a Tab stop (the cursor, else the first row).
   if (!st.cursor || !st.rows.includes(st.cursor)) { const f = st.rows[0] && els.get(st.rows[0]); if (f) f.tabIndex = 0; }
   if (active && active.isConnected && document.activeElement !== active && active !== document.body) active.focus({ preventScroll: true });

@@ -172,8 +172,8 @@ export function createSync({
       e.n = ok, fails++;
       const s = e.status;
       if (s == 401) halted = 1;
-      backoff = now() + (s == 429 ? (e.retry || 60) * 1e3 : Math.min(30 * MIN, 15e3 * 2 ** fails));
-      status(e.net ? 'offline' : 'error', s == 401 ? 'Sync key not recognised by the server' : s ? 'Server error ' + s : e.net ? 'Network error' : String(e.message || e));
+      backoff = now() + (s == 429 || s == 503 ? (e.retry || 60) * 1e3 : s == 507 ? 6 * 60 * MIN : Math.min(30 * MIN, 15e3 * 2 ** fails));
+      status(e.net ? 'offline' : 'error', s == 401 ? 'Sync key not recognised by the server' : s == 507 ? 'The sync server is out of space for this account' : s == 429 ? 'Too many sync requests; retrying shortly' : s ? 'Server error ' + s : e.net ? 'Network error' : String(e.message || e));
       throw e;
     }
     fails = 0;
@@ -238,7 +238,7 @@ export function createSync({
         if (e.n) return; // paired and partly synced: the rest follows on the next sync
         st = prev, halted = 0, backoff = 0;
         await save(), status(st.key ? 'idle' : 'unpaired');
-        throw Error(e.status == 401 ? 'Unknown pairing code' : 'Could not reach the sync server');
+        throw Error(e.status == 401 ? 'Unknown pairing code' : e.status == 429 ? 'Too many attempts; try again in a minute' : 'Could not reach the sync server');
       }
     }, 1),
     /** Forget the key on this device. unpair(true) also erases the server copy first (rejects if that fails). */

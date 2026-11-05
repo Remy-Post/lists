@@ -262,7 +262,7 @@ ui.datePicker = (ids, mode, anchor) => {
   drawGrid();
   const panel = h('section', { class: 'dp' }, input, sugg, qrow, head, grid);
   const entry = open(panel, { anchor, label: mode === 'when' ? 'When' : 'Deadline' });
-  setTimeout(() => input.focus({ preventScroll: true }), 20);
+  input.focus({ preventScroll: true });
 };
 function nextMonday() { const d = new Date(); d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7)); return ymd(d); }
 function friday() { const d = new Date(); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7)); return ymd(d); }
@@ -296,7 +296,7 @@ ui.compose = (at) => {
     const l = p.list ? A.findList(p.list) : null;
     where.textContent = 'In ' + (l ? S.val(l, 'title') : p.list ? `${tname} (no list “${p.list}”)` : tname);
     preview.replaceChildren(...bits.map((b) => h('span', null, b)));
-    DB.setMeta('draft', text);
+    if (DB.getMeta('draft') !== text) { DB.setMeta('draft', text); DB.flush(); } // a draft must survive a kill
   };
   let prevVal = ta.value;
   ta.addEventListener('input', () => {
@@ -338,7 +338,7 @@ ui.compose = (at) => {
       st.touch ? h('button', { class: 'btn primary qa-add', onclick: () => submit(false) }, 'Add') : h('span', { class: 'qa-hint' }, h('kbd', null, 'Return'), ' adds, ', h('kbd', null, 'Esc'), ' closes')));
   const entry = open(panel, { kind: phone() ? 'sheet' : 'modal', label: 'Quick add' });
   draw();
-  setTimeout(() => ta.focus(), 20);
+  ta.focus({ preventScroll: true });
 };
 const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
@@ -400,7 +400,7 @@ ui.palette = (mode = 'all') => {
   palOpen = panel;
   const entry = open(panel, { kind: phone() ? 'sheet' : 'modal', label: 'Command palette', onClose: () => { palOpen = null; } });
   build();
-  setTimeout(() => input.focus(), 20);
+  input.focus({ preventScroll: true });
 };
 function reveal(id) {
   // Open the page that contains the item, expand its ancestors, focus it.
