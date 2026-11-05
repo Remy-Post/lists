@@ -47,6 +47,10 @@ async function prime(base) {
   await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 20000 }).catch(() => {});
   await sleep(1200);
   await ready(page);
+  // The first-run tour lands on Today, where tree moves (Tab) are disabled by design; edit on the Inbox outline.
+  await page.goto(base + '/#/inbox');
+  await ready(page);
+  await page.waitForFunction(() => window.__lists.st.route.view === 'inbox');
   return { dir, b, page };
 }
 async function readBack(dir, base) {
@@ -57,7 +61,7 @@ async function readBack(dir, base) {
     const { S, DB } = window.__lists;
     const out = [];
     for (const [id] of S.recs) if (S.isLive(id)) out.push({ id, title: S.val(id, 'title'), parent: S.parentOf(id), when: S.val(id, 'when') });
-    return { recs: out, draft: DB.getMeta('draft') || '' };
+    return { recs: out, draft: DB.getMeta('draft') || '', total: S.recs.size, nodb: document.body.classList.contains('nodb'), tourTitles: out.filter((r) => r.parent === 'inbox').length };
   });
   await b.browser.close().catch(() => {});
   await hardKill(b);
@@ -80,7 +84,7 @@ async function editBurst(page, tag) {
 function judgeBurst(d, tag) {
   const a = byTitle(d, new RegExp(`^A-${tag}$`));
   const b = byTitle(d, new RegExp(`^B-${tag}`));
-  return { newItem: !!a, fullTitle: !!b && b.title.startsWith(`B-${tag}!z`), indent: !!a && !!b && b.parent === a.id, title: b && b.title };
+  return { total: d.total, nodb: d.nodb, inboxKids: d.tourTitles, newItem: !!a, fullTitle: !!b && b.title.startsWith(`B-${tag}!z`), indent: !!a && !!b && b.parent === a.id, title: b && b.title };
 }
 
 const results = {};

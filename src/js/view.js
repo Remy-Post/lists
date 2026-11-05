@@ -120,7 +120,16 @@ function makeRow(id) {
   return el;
 }
 
+/** Everything a row's appearance depends on; if unchanged, the DOM is already right. */
+function sigOf(id, m, smart) {
+  const r = S.recs.get(id);
+  return (r ? r.v : '') + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
+    (st.collapsed.has(id) ? 1 : 0) + (st.sel.has(id) ? 1 : 0) + (st.cursor === id ? 1 : 0) + '|' + (S.hasChildren(id) ? S.countOpen(id) : -1) + '|' + (smart ? S.ancestors(id).join() : '');
+}
 export function fillRow(el, id, m, smart) {
+  const sig = sigOf(id, m, smart);
+  if (el._sig === sig && document.activeElement !== el._tx) return;
+  el._sig = sig;
   const done = S.val(id, 'done'), heading = S.val(id, 'heading');
   const kidsN = S.hasChildren(id);
   const collapsed = st.collapsed.has(id);

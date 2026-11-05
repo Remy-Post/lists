@@ -7,7 +7,8 @@ const CACHE = 'lists-' + V;
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     const c = await caches.open(CACHE);
-    await c.addAll(PRE.map((u) => new Request(u, { cache: 'reload' })));
+    // Hashed assets are immutable, so the HTTP cache is safe for them; only the shell must be fresh.
+    await c.addAll(PRE.map((u) => (u.startsWith('/assets/') ? u : new Request(u, { cache: 'no-cache' }))));
     if (!self.registration.active) await self.skipWaiting(); // first install: take control now
   })());
 });

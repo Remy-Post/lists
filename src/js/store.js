@@ -108,9 +108,11 @@ const subs = new Set();
 export const subscribe = (fn) => { subs.add(fn); return () => subs.delete(fn); };
 let pending = null, pendingStructural = false, pendingFields = null;
 export let version = 0;
+const QUIET = new Set(['title', 'notes', 'priority', 'tags', 'rrule', 'repeatFrom', 'time', 'color', 'created', 'origin']);
 function changed(id, structural, fields) {
   version++;
-  memo.clear();
+  // Typing a title can't change counts or smart views, so it keeps the memo (QA B1: no 10k walk per key).
+  if (structural || !fields || fields.some((f) => !QUIET.has(f))) memo.clear();
   if (structural) { pendingStructural = true; orderCache = null; }
   (pending ||= new Set()).add(id);
   pendingFields ||= new Set();

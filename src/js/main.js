@@ -83,6 +83,7 @@ function show(r, kind, fromRow) {
   const shallower = prev.view === 'node' && (r.view !== 'node' || S.ancestors(prev.id).includes(r.id));
   const doRender = () => { renderPage(); renderSide(); };
   if (same) { doRender(); return; }
+  scrollTo({ top: 0 }); // before rendering: scrolling after forced a full layout of the new page (QA B2)
   // Move focus to the page (not a row) so keyboard users land in the new context (a11y-09).
   queueMicrotask(() => { const m = $('#main'); if (!st.touch && m && (document.activeElement === document.body || !document.activeElement || !document.activeElement.isConnected)) m.focus({ preventScroll: true }); announce(r); });
   if (r.view !== 'today' && light) { light.destroy(); light = null; }
@@ -100,9 +101,8 @@ function show(r, kind, fromRow) {
     if (t) t.style.viewTransitionName = '';
     if (t) pt.style.viewTransitionName = 'ztitle';
     doRender();
-  }, kind === 'key' ? 'key' : 'nav');
+  }, kind === 'key' || !(deeper || shallower) ? 'key' : 'nav'); // list switches render instantly (QA B7)
   setTimeout(() => { pt.style.viewTransitionName = ''; }, 700);
-  scrollTo({ top: 0 });
   if (st.touch) closeDrawer();
 }
 ui.go = (r, kind = 'pointer', fromRow) => {
@@ -376,6 +376,11 @@ function watchStorage() {
 /* ---------------- service worker ---------------- */
 function registerSW() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:' || VERSION === 'dev') return;
+  // Register once the page has loaded and gone quiet, so the precache never competes with the app on 3G (QA B5).
+  const go = () => setTimeout(() => (window.requestIdleCallback || setTimeout)(() => doRegister(), { timeout: 4000 }), 1500);
+  if (document.readyState === 'complete') go(); else addEventListener('load', go, { once: true });
+}
+function doRegister() {
   navigator.serviceWorker.register('/sw.js').then((reg) => {
     const onReady = (w) => w.addEventListener('statechange', () => {
       if (w.state === 'installed' && navigator.serviceWorker.controller) ui.toast('An update is ready', { action: { label: 'Reload', run: () => { w.postMessage('skip'); } }, ms: 10000 });

@@ -83,21 +83,27 @@ const longs = (page) => page.evaluate(() => window.__perf.long);
 /** Typing into a row: keydown → the frame after the input is handled (rAF, then a message posted from it). */
 async function typingLatency(page, rowId, nKeys = 120) {
   await page.evaluate(() => {
-    window.__lat = [];
+    window.__lat = []; window.__task = [];
+    let kd = 0;
     addEventListener('keydown', (e) => {
-      const t0 = e.timeStamp;
+      const t0 = e.timeStamp; kd = t0;
       requestAnimationFrame(() => { const ch = new MessageChannel(); ch.port1.onmessage = () => window.__lat.push(performance.now() - t0); ch.port2.postMessage(0); });
     }, true);
+    // End of the key's task: after the app's input handlers and the store's microtask flush.
+    addEventListener('input', () => { const t0 = kd; queueMicrotask(() => queueMicrotask(() => window.__task.push(performance.now() - t0))); });
     window.__perf.events.length = 0;
   });
-  await page.keyboard.press('Escape');
-  await app(page, (S, O, A, DB, st, ui, id) => ui.focus(id), rowId);
-  await page.keyboard.press('i');
+  if (rowId) {
+    await page.keyboard.press('Escape');
+    await app(page, (S, O, A, DB, st, ui, id) => ui.focus(id), rowId);
+    await page.keyboard.press('i');
+  } else await page.focus('#ed');
   const text = 'the quick brown fox jumps over the lazy dog ';
   for (let i = 0; i < nKeys; i++) { await page.keyboard.type(text[i % text.length]); await sleep(40); }
   await sleep(300);
-  return page.evaluate(() => ({ lat: window.__lat.slice(1), events: window.__perf.events.filter((e) => e.name === 'keydown' || e.name === 'keypress' || e.name === 'input' || e.name === 'beforeinput') }));
+  return page.evaluate(() => ({ lat: window.__lat.slice(1), task: window.__task.slice(1), events: window.__perf.events.filter((e) => e.name === 'keydown' || e.name === 'keypress' || e.name === 'input' || e.name === 'beforeinput') }));
 }
+const stats = (a) => ({ p50: +median(a).toFixed(1), p95: +pct(a, 95).toFixed(1), max: +Math.max(...a).toFixed(1) });
 
 build();
 const srv = await startStatic(8088);
@@ -106,6 +112,16 @@ const browser = await chromium.launch({ args: CHROME_ARGS });
 for (const cpu of CPUS) {
   console.log(`\n== CPU ×${cpu}`);
   const R = (out['cpu' + cpu] = {});
+
+  // 0. Calibration: the same measurement on a blank page with one contenteditable (the vsync floor of the metric).
+  await C.step(`floor ×${cpu}`, async () => {
+    const { ctx, page } = await newPage(browser, cpu);
+    await page.setContent('<div id="ed" contenteditable="true" style="font:15px sans-serif">x</div>');
+    const r = await typingLatency(page, null, 80);
+    R.floor = { frame: stats(r.lat), task: stats(r.task) };
+    console.log('  floor (blank contenteditable):', JSON.stringify(R.floor));
+    await ctx.close();
+  });
 
   // 1. 2,000-node tree: input latency typing in a row on a page with ~200 visible rows (and on the Inbox).
   await C.step(`2k typing ×${cpu}`, async () => {
@@ -119,9 +135,9 @@ for (const cpu of CPUS) {
     const r = await typingLatency(page, row);
     const lat = r.lat;
     const reported = new Set(r.events.map((e) => Math.round(e.t))).size;
-    R.typing2k = { nodes: info.n, maxDepth: info.maxDepth, visibleRows: visible, keys: lat.length, p50: median(lat), p95: pct(lat, 95), max: Math.max(...lat), eventTimingOver16: reported, maxProcessing: Math.max(0, ...r.events.map((e) => e.p)) };
+    R.typing2k = { nodes: info.n, maxDepth: info.maxDepth, visibleRows: visible, keys: lat.length, p50: median(lat), p95: pct(lat, 95), max: Math.max(...lat), task: stats(r.task), eventTimingOver16: reported, maxProcessing: Math.max(0, ...r.events.map((e) => e.p)) };
     console.log('  2k typing:', JSON.stringify(R.typing2k));
-    if (cpu === 1) C.ok(R.typing2k.p95 <= 16, `2,000 nodes, ${visible} visible rows, CPU ×1: keypress→next frame p95 ≤ 16 ms`, `p50 ${R.typing2k.p50.toFixed(1)} · p95 ${R.typing2k.p95.toFixed(1)} · max ${R.typing2k.max.toFixed(1)} ms; Event Timing ≥16 ms: ${reported}/${lat.length}`);
+    if (cpu === 1) C.ok(R.typing2k.p95 <= 16, `2,000 nodes, ${visible} visible rows, CPU ×1: keypress→next frame p95 ≤ 16 ms`, `key→frame p50 ${R.typing2k.p50.toFixed(1)} · p95 ${R.typing2k.p95.toFixed(1)} · max ${R.typing2k.max.toFixed(1)} ms (blank-page floor p50 ${R.floor?.frame.p50} · p95 ${R.floor?.frame.p95}); key task p50 ${R.typing2k.task.p50} · p95 ${R.typing2k.task.p95} ms; Event Timing ≥16 ms entries: ${reported} for ${lat.length} keys`);
     await ctx.close();
   });
 
@@ -173,11 +189,11 @@ for (const cpu of CPUS) {
     console.log('  10k interactions:', JSON.stringify(R.interact10k));
     const row = await app(page, (S, O, A, DB, st) => st.rows[250]);
     const r = await typingLatency(page, row, 80);
-    R.typing10k = { visibleRows: await app(page, (S, O, A, DB, st) => st.rows.length), p50: median(r.lat), p95: pct(r.lat, 95), max: Math.max(...r.lat) };
+    R.typing10k = { visibleRows: await app(page, (S, O, A, DB, st) => st.rows.length), p50: median(r.lat), p95: pct(r.lat, 95), max: Math.max(...r.lat), task: stats(r.task) };
     console.log('  10k typing on the 500-row node:', JSON.stringify(R.typing10k));
     if (cpu === 1) {
       C.ok(R.render500.longest <= 50, 'CPU ×1: rendering the node with 500 visible rows has no long task > 50 ms', `longest ${R.render500.longest} ms, key→frame ${R.render500.frameMs?.toFixed(0)} ms, rows ${R.render500.rows}`);
-      C.ok(R.typing10k.p95 <= 16, 'CPU ×1: 10k fixture, typing on the 500-row page, p95 ≤ 16 ms (informational)', `p50 ${R.typing10k.p50.toFixed(1)} · p95 ${R.typing10k.p95.toFixed(1)} ms`);
+      C.ok(R.typing10k.p95 <= 16, 'CPU ×1: 10k fixture, typing on the 500-row page, p95 ≤ 16 ms (informational)', `key→frame p50 ${R.typing10k.p50.toFixed(1)} · p95 ${R.typing10k.p95.toFixed(1)} ms; key task p50 ${R.typing10k.task.p50} · p95 ${R.typing10k.task.p95} ms`);
     }
     if (cpu === 4) {
       C.ok(R.boot10k.readyMedian <= 1500, 'CPU ×4: 10k fixture boots (window.__lists ready) in ≤ 1.5 s', `${R.boot10k.readyMedian.toFixed(0)} ms (bootMs ${R.boot10k.bootMsMedian.toFixed(0)})`);

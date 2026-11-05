@@ -16,7 +16,9 @@ node tests/e2e/smoke.mjs        # (pre-existing) boot + screenshots; needs BASE=
 
 Every suite first runs `node build.mjs` with `OUT=tests/e2e/out/dist`, so it never touches the shared `dist/`
 and it tests the current `src/`. Set `NO_BUILD=1` to reuse the last build (do this when comparing runs, so all
-suites test the same bytes; the build id is in `tests/e2e/out/dist/version.txt`).
+suites test the same bytes; the build id is in `tests/e2e/out/dist/version.txt`). `DIST=<dir>` points the suites
+at another build directory (e.g. `OUT=tests/e2e/out/dist-x node build.mjs`, then `NO_BUILD=1 DIST=tests/e2e/out/dist-x`).
+Suites write `tests/e2e/out/<suite>.json`; copy them aside before testing another build.
 
 Ports used (all bound to 127.0.0.1, all killed on exit): static 8088–8098 and 8089/8093 (with `/api` proxied),
 sync servers 8094 and 8099, TCP proxies 8095/8096. Sync servers use a throwaway SQLite file in `$TMPDIR` with

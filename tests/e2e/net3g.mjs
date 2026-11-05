@@ -72,7 +72,9 @@ async function coldAndRepeat(browser, base, label, net, proxy) {
   const wfCold = waterfall(reqs);
   const coldBytesAtReady = [...reqs.values()].filter((r) => r.end && (r.end - [...reqs.values()][0].start) * 1000 <= cold.ready + 50).reduce((s, r) => s + (r.bytes || 0), 0);
   // The service worker installs, claims, and the app reloads itself once (main.js registerSW → controllerchange).
-  const controlledAt = await until(() => (docs().length > 1 ? events.find((e) => e.origin !== firstOrigin && e.ev === 'ready') : null), 180000);
+  // Wait for the SW to control the page, then give a self-reload 4 s to show up.
+  await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 180000 }).catch(() => {});
+  const controlledAt = await until(() => (docs().length > 1 ? events.find((e) => e.origin !== firstOrigin && e.ev === 'ready') : null), 4000);
   const reload = controlledAt ? { afterColdReadyMs: Math.round(controlledAt.wall - (wall0 + 0)) - 0, secondDocOriginDeltaMs: Math.round(controlledAt.origin - firstOrigin) } : null;
   await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 120000 }).catch(() => {});
   await sleep(1000);
