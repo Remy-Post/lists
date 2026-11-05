@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gl.js demo: Today, struck through</title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper: oklch(0.985 0.004 250);
+    --ink: oklch(0.27 0.014 258);
+    --ink-2: oklch(0.48 0.012 258);
+    --blue: oklch(0.60 0.13 240);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: oklch(0.255 0.012 258);
+    --ink: oklch(0.94 0.006 258);
+    --ink-2: oklch(0.76 0.010 258);
+    --blue: oklch(0.78 0.115 235);
+  }
+  html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); }
+  body { font: 15px/22px "Mona Sans", system-ui, sans-serif; }
+  .sheet { position: relative; isolation: isolate; min-height: 100%; overflow: hidden; }
+  .col { max-width: 720px; margin: 0 auto; padding: 120px 20px 0; }
+  .strikes { display: block; }
+  .strikes path { fill: none; stroke: var(--blue); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  h1 { font-size: 28px; line-height: 32px; font-weight: 640; font-stretch: 125%; margin: 48px 0 6px 32px; letter-spacing: -0.01em; }
+  .count { margin-left: 32px; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .ctl { position: fixed; right: 16px; bottom: 16px; display: flex; gap: 8px; font-size: 13px; }
+  .ctl[hidden] { display: none; }
+  .ctl button { font: inherit; color: var(--ink); background: none; border: 1px solid color-mix(in oklch, var(--ink) 25%, transparent); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="sheet" id="sheet">
+  <div class="col">
+    <svg class="strikes" id="strikes" width="680" height="324" aria-hidden="true"></svg>
+    <h1>Today is clear.</h1>
+    <div class="count">9 done</div>
+  </div>
+</div>
+<div class="ctl" id="ctl" hidden>
+  <button id="again">Sweep</button>
+  <button id="theme">Theme</button>
+</div>
+<script type="module">
+  import { strikeLight, supported, supportedAsync } from '../../src/js/gl.js';
+
+  const q = new URLSearchParams(location.search);
+  const theme = q.get('theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.documentElement.dataset.theme = theme;
+  if (!q.has('shot')) document.getElementById('ctl').hidden = false;
+
+  // Fake strikes: one seeded, slightly wobbly pencil line per "completed" row (36 px rows).
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+  const widths = [212, 348, 164, 296, 401, 138, 257, 322, 189];
+  const svg = document.getElementById('strikes');
+  svg.innerHTML = widths.map((w, i) => {
+    const y = 18 + i * 36, x0 = 32 + rnd() * 3, x1 = x0 + w, tilt = (rnd() - 0.5) * 2.2;
+    let d = `M${x0.toFixed(1)} ${(y + tilt).toFixed(1)}`;
+    const n = Math.max(3, Math.round(w / 60));
+    for (let k = 1; k <= n; k++) {
+      const x = x0 + (w * k) / n, cx = x - w / n / 2;
+      d += ` Q${cx.toFixed(1)} ${(y + (rnd() - 0.5) * 2.4).toFixed(1)} ${x.toFixed(1)} ${(y - tilt * (k / n) * 2 + (rnd() - 0.5)).toFixed(1)}`;
+    }
+    return `<path d="${d}"/>`;
+  }).join('');
+
+  const host = document.getElementById('sheet');
+  let light = strikeLight(host, { theme });
+  window.__gl = {
+    supported, supportedAsync,
+    sweep: () => light.sweep(),
+    destroy: () => light.destroy(),
+    canvas: () => host.querySelector('canvas'),
+  };
+  document.getElementById('again').onclick = () => light.sweep();
+  document.getElementById('theme').onclick = () => {
+    const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = t;
+    light.destroy();
+    light = strikeLight(host, { theme: t });
+    light.sweep();
+  };
+  window.__ready = true;
+  if (!q.has('shot')) light.sweep();
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# lists-sync: the Lists sync backend. Run from the repo root:
+#   docker compose -f deploy/docker-compose.sync.yml up -d --build
+# Caddy (n8n-caddy-1) reaches it as lists-sync:8787 on n8n_default; no host port is published.
+name: lists
+services:
+  lists-sync:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    image: lists-sync:latest
+    container_name: lists-sync
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 10s
+    volumes:
+      - lists_sync_data:/data
+    networks:
+      - n8n_default
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "3" }
+
+volumes:
+  lists_sync_data:
+    name: lists_sync_data
+
+networks:
+  n8n_default:
+    external: true

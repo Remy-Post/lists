@@ -1,0 +1,42 @@
+/* desk.css — loaded at 1200px and wider (16" MacBook Pro: 1728×1117 "looks like", DPR 2, 120Hz ProMotion, P3).
+   Dense rows, hover affordances only for fine pointers, a docked inspector from 1440px
+   (docs/research/02-platform.md "Decisions" 2–6; docs/PLAN.md §4, §11). */
+
+:root { --side-w: 264px; --row-h: 34px; }
+.sheet { max-width: 800px; padding: 64px 56px 0; }
+.ptitle { font-size: 32px; line-height: 38px; }
+.stack { top: 30px; left: 48px; right: 48px; }
+
+@media (hover: hover) and (pointer: fine) {
+  .nv:hover, .li:hover, .icon-btn:hover, .sync:hover { background: var(--hover); }
+  .nv.on:hover, .li.on:hover { background: var(--press); }
+  .row:hover { background-color: var(--hover); }
+  .row.sel:hover { background-color: color-mix(in oklch, var(--blue) 13%, transparent); }
+  .row.parent:hover .tw { opacity: 0.7; }
+  .row .ck:hover { color: var(--ink-2); }
+  .row .ck:hover .box { stroke-width: 1.8; }
+  .row:not(.done) .ck:hover .tick { stroke: var(--ink-3); stroke-dashoffset: 0; }
+  .ct:hover { background: var(--press); color: var(--ink); }
+  .row { cursor: default; }
+  .row .bd { cursor: text; }
+  .crumb:hover { color: var(--ink); background: var(--hover); }
+  .btn:hover { background: var(--hover); }
+  .btn.primary:hover { background: color-mix(in oklch, var(--blue) 90%, var(--ink)); }
+  .chipbtn:hover, .dp-grid .day:hover, .dp-head .nav:hover { background: var(--hover); }
+  .opt:hover:not(.on) { background: var(--hover); }
+  .seg button:hover:not(.on) { color: var(--ink); }
+  .i-close:hover { background: var(--hover); }
+  button.i-field:hover { background: var(--hover); }
+  .tail:hover { background: linear-gradient(var(--hover), transparent 64px); border-radius: var(--r); }
+}
+
+/* Docked inspector on wide screens (the MacBook maximised). */
+@media (min-width: 1440px) {
+  body.has-insp .app { grid-template-columns: var(--side-w) minmax(0, 1fr) 380px; }
+  .insp { display: block; position: sticky; top: 0; height: 100svh; overflow-y: auto; border-left: 1px solid var(--rule); background: var(--paper); padding: 28px 26px 24px; animation: insp-in 260ms var(--spring-lift); }
+  .insp:not([hidden]) { display: block; }
+  @keyframes insp-in { from { opacity: 0; transform: translateX(12px); } }
+}
+@media (min-width: 1600px) {
+  .sheet { max-width: 840px; }
+}

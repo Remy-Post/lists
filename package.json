@@ -1,0 +1,16 @@
+{
+  "name": "lists",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Unlimited lists, unlimited depth. A local-first, keyboard-first to-do PWA.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/unit/ && python3 -m unittest discover -s server -p 'test_*.py'",
+    "serve": "node tests/harness/serve.mjs dist 8080"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}

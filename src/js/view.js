@@ -1,0 +1,368 @@
+// view.js — rendering. Keyed reconciliation of rows, FLIP for structural moves,
+// the paper stack for depth, and the strike for completion.
+import * as S from './store.js';
+import { st, $, h, pageRoot } from './state.js';
+import { formatDay, describeRRule, fromYMD } from './parse.js';
+import { drawStrike } from './strike.js';
+import { today } from './actions.js';
+
+const CE = (() => { const d = document.createElement('div'); d.contentEditable = 'plaintext-only'; return d.contentEditable === 'plaintext-only' ? 'plaintext-only' : 'true'; })();
+export const ICON = {
+  chev: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>',
+  check: '<svg viewBox="0 0 20 20" aria-hidden="true"><rect class="box" x="1.5" y="1.5" width="17" height="17" rx="5"/><path class="tick" d="M5.6 10.3 8.7 13.3 14.6 6.9"/></svg>',
+  flag: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 11V1.5M2.5 2h6.2l-1.4 2.2 1.4 2.3H2.5"/></svg>',
+  rep: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 5.2A4 4 0 0 1 9.4 3.4M10 6.8a4 4 0 0 1-7.4 1.8M9.6 1.4v2.2H7.4M2.4 10.6V8.4h2.2"/></svg>',
+  note: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 3h8M2 6h8M2 9h5"/></svg>',
+  moon: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M9.8 7.6A4.3 4.3 0 0 1 4.4 2.2a4.3 4.3 0 1 0 5.4 5.4Z"/></svg>',
+};
+
+const els = new Map();      // id → row element (current page)
+let pageKey = '';
+export const rowEl = (id) => els.get(id);
+const todayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return +d; };
+
+/* ---------------- row model ---------------- */
+function hiddenDone(id) {
+  if (st.showDone) return false;
+  return S.val(id, 'done') && (S.val(id, 'doneAt') || 0) < todayStart();
+}
+function outlineRows(root) {
+  const out = [];
+  const walk = (p, d) => {
+    for (const c of S.children(p)) {
+      if (S.val(c, 'kind') === 'log' || hiddenDone(c)) continue;
+      out.push({ id: c, depth: d, parent: p });
+      if (!st.collapsed.has(c) && S.hasChildren(c)) walk(c, d + 1);
+    }
+  };
+  walk(root, 0);
+  return out;
+}
+function groupsFor(view) {
+  const t = today();
+  if (view === 'today') {
+    const { day, eve } = S.qToday(t);
+    const done = S.qDoneToday(todayStart()).filter((id) => {
+      const w = S.val(id, 'when'), dl = S.val(id, 'deadline');
+      return (w && w <= t) || (dl && dl <= t);
+    });
+    const g = [{ key: 'day', rows: [...day, ...done.filter((id) => !(S.val(id, 'evening')))] }];
+    const e = [...eve, ...done.filter((id) => S.val(id, 'evening'))];
+    if (e.length) g.push({ key: 'eve', label: 'This evening', icon: ICON.moon, rows: e });
+    return g;
+  }
+  if (view === 'upcoming') {
+    return S.qUpcoming(t).map(([d, ids]) => ({ key: d, label: dayLabel(d), date: d, rows: ids }));
+  }
+  if (view === 'someday') return [{ key: 'sd', rows: S.qSomeday() }];
+  if (view === 'logbook') {
+    const m = new Map();
+    for (const id of S.qLogbook()) {
+      const d = new Date(S.val(id, 'doneAt') || 0); d.setHours(0, 0, 0, 0);
+      const k = +d;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(id);
+    }
+    return [...m].map(([k, ids]) => ({ key: 'l' + k, label: formatDay(ymdOf(new Date(k)), new Date()), rows: ids }));
+  }
+  if (view === 'trash') return [{ key: 'tr', rows: S.qTrash() }];
+  return [];
+}
+const ymdOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function dayLabel(d) {
+  const f = formatDay(d, new Date());
+  const dt = fromYMD(d);
+  const n = dt.getDate();
+  const diff = Math.round((dt - fromYMD(today())) / 864e5);
+  if (diff <= 6) return { big: String(n), small: f };
+  return { big: String(n), small: dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short' }) };
+}
+
+/* ---------------- rows ---------------- */
+function makeRow(id) {
+  const el = h('div', { class: 'row', role: 'treeitem', 'data-id': id, tabindex: '-1' });
+  el.innerHTML =
+    '<button class="tw" tabindex="-1" aria-hidden="true">' + ICON.chev + '</button>' +
+    '<button class="ck" tabindex="-1" role="checkbox" aria-checked="false" aria-label="Complete">' + ICON.check + '</button>' +
+    '<div class="bd"><div class="pa"></div><div class="tl"><span class="tx" spellcheck="true"></span></div><div class="nt"></div><div class="mt"></div></div>' +
+    '<button class="ct" tabindex="-1" aria-label="Open"></button>';
+  const tx = el.querySelector('.tx');
+  tx.contentEditable = CE;
+  tx.setAttribute('role', 'textbox');
+  tx.setAttribute('aria-label', 'Title');
+  el._tx = tx;
+  return el;
+}
+
+export function fillRow(el, id, m, smart) {
+  const done = S.val(id, 'done'), heading = S.val(id, 'heading');
+  const kidsN = S.hasChildren(id);
+  const collapsed = st.collapsed.has(id);
+  const t = today();
+  el.style.setProperty('--d', m.depth || 0);
+  el.classList.toggle('done', !!done);
+  el.classList.toggle('heading', !!heading);
+  el.classList.toggle('parent', kidsN);
+  el.classList.toggle('collapsed', kidsN && (collapsed || smart));
+  el.classList.toggle('sel', st.sel.has(id));
+  el.classList.toggle('cur', st.cursor === id);
+  el.classList.toggle('trashed', st.route.view === 'trash');
+  el.classList.toggle('smart', !!smart);
+  el.setAttribute('aria-level', (m.depth || 0) + 1);
+  if (kidsN && !smart) el.setAttribute('aria-expanded', String(!collapsed)); else el.removeAttribute('aria-expanded');
+  el.setAttribute('aria-selected', String(st.sel.has(id)));
+  const ck = el.children[1];
+  ck.setAttribute('aria-checked', String(!!done));
+  // title (never clobber the text being edited)
+  const title = S.val(id, 'title');
+  if (document.activeElement !== el._tx && el._tx.textContent !== title) el._tx.textContent = title;
+  el._tx.dataset.ph = heading ? 'Heading' : 'New item';
+  // path (smart views)
+  const pa = el.querySelector('.pa');
+  if (smart) {
+    // Items straight in the Inbox need no path; nested items show where they live.
+    const anc = S.ancestors(id).filter((a, i, arr) => !(a === S.INBOX && arr.length === 1)).map((a) => (a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled'));
+    pa.textContent = anc.join('  ›  ');
+  } else pa.textContent = '';
+  // notes preview
+  const notes = S.val(id, 'notes');
+  el.querySelector('.nt').textContent = notes ? notes.split('\n')[0] : '';
+  // metadata
+  const mt = el.querySelector('.mt');
+  const bits = [];
+  const w = S.val(id, 'when'), dl = S.val(id, 'deadline');
+  const inToday = st.route.view === 'today';
+  if (w && !(inToday && w === t)) {
+    if (w < t && !done) bits.push(`<span class="chip since">${inToday ? 'since ' : ''}${formatDay(w, new Date())}</span>`);
+    else if (!(inToday)) bits.push(`<span class="chip when">${formatDay(w, new Date())}${S.val(id, 'evening') ? ' ' + ICON.moon : ''}</span>`);
+  } else if (w && S.val(id, 'evening') && !inToday) bits.push(`<span class="chip when">This evening</span>`);
+  if (S.val(id, 'someday') && !w && st.route.view !== 'someday') bits.push('<span class="chip when">Someday</span>');
+  if (dl) {
+    const late = dl < t && !done, due = dl === t;
+    bits.push(`<span class="chip dl${late ? ' late' : ''}${due ? ' due' : ''}">${ICON.flag}${due ? 'Due today' : formatDay(dl, new Date())}</span>`);
+  }
+  if (S.val(id, 'rrule')) bits.push(`<span class="chip rep" title="${esc(safeDescribe(S.val(id, 'rrule')))}">${ICON.rep}</span>`);
+  const tags = S.val(id, 'tags');
+  if (tags && tags.length) bits.push(...tags.map((g) => `<span class="chip tag">${esc(g)}</span>`));
+  const pr = S.val(id, 'priority');
+  el.dataset.pri = pr || '';
+  const mtHtml = bits.join('');
+  if (mt._h !== mtHtml) { mt.innerHTML = mtHtml; mt._h = mtHtml; }
+  // count / open affordance
+  const ct = el.querySelector('.ct');
+  const n = kidsN ? S.countOpen(id) : 0;
+  ct.textContent = kidsN ? (n ? String(n) : '✓') : '';
+  ct.hidden = !kidsN;
+  // strike bookkeeping
+  if (done && !el._done) el._strikeQ = el._done === undefined ? 'static' : 'anim';
+  if (!done && el._done) { el._strikeQ = null; const s = el.querySelector('.tl > svg.strike'); if (s) s.remove(); }
+  el._done = !!done;
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const safeDescribe = (r) => { try { return describeRRule(r); } catch { return 'Repeats'; } };
+
+function flushStrikes() {
+  for (const [id, el] of els) {
+    if (!el._done || !el.isConnected) continue;
+    const tl = el.querySelector('.tl');
+    const w = el._tx.getBoundingClientRect().width;
+    if (el._strikeQ === 'anim') {
+      el._strikeQ = null;
+      // Let the title condense first, then measure and draw (docs/PLAN.md §11.4).
+      setTimeout(() => { el._sw = w; drawStrike(tl, el._tx, id, st.reduced ? false : 'full'); }, st.reduced ? 0 : 190);
+    } else if (el._strikeQ === 'static' || (el._sw && Math.abs(el._sw - w) > 1) || !tl.querySelector('svg.strike')) {
+      el._strikeQ = null; el._sw = w;
+      drawStrike(tl, el._tx, id, false);
+    }
+  }
+}
+let strikeRaf = 0;
+export function queueStrikes() { if (!strikeRaf) strikeRaf = requestAnimationFrame(() => { strikeRaf = 0; flushStrikes(); }); }
+new ResizeObserver(() => { for (const el of els.values()) el._sw = -1; queueStrikes(); }).observe(document.documentElement);
+
+/* ---------------- reconcile + FLIP ---------------- */
+function reconcile(box, nodes) {
+  let cur = box.firstChild;
+  for (const n of nodes) {
+    if (n === cur) { cur = cur.nextSibling; continue; }
+    box.insertBefore(n, cur);
+  }
+  while (cur) { const nx = cur.nextSibling; cur.remove(); cur = nx; }
+}
+function measure() {
+  const m = new Map();
+  if (st.reduced) return m;
+  const vh = innerHeight;
+  for (const [id, el] of els) {
+    if (!el.isConnected) continue;
+    const r = el.getBoundingClientRect();
+    if (r.bottom > -200 && r.top < vh + 200) m.set(id, r.top);
+  }
+  return m;
+}
+function play(before) {
+  if (!before.size) return;
+  for (const [id, top] of before) {
+    const el = els.get(id);
+    if (!el || !el.isConnected) continue;
+    const dy = top - el.getBoundingClientRect().top;
+    if (Math.abs(dy) < 1) continue;
+    el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 220, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
+  }
+}
+
+/* ---------------- page ---------------- */
+let lastToday = '';
+export function renderPage(opts = {}) {
+  const r = st.route;
+  const key = r.view + ':' + (r.id || '');
+  const box = $('#outline');
+  if (key !== pageKey) { els.clear(); box.replaceChildren(); pageKey = key; }
+  const before = opts.flip ? measure() : new Map();
+  const active = document.activeElement;
+  const nodes = [];
+  st.rows = []; st.info.clear();
+  const seen = new Set();
+  const pushRow = (id, m, smart) => {
+    let el = els.get(id);
+    if (!el) { el = makeRow(id); els.set(id, el); }
+    fillRow(el, id, m, smart);
+    nodes.push(el); st.rows.push(id); st.info.set(id, m); seen.add(id);
+  };
+  renderHead();
+  if (r.view === 'node' || r.view === 'inbox') {
+    const root = pageRoot();
+    for (const m of outlineRows(root)) pushRow(m.id, m, false);
+  } else {
+    for (const g of groupsFor(r.view)) {
+      if (!g.rows.length) continue;
+      if (g.label) {
+        const gk = 'g:' + g.key;
+        let ge = els.get(gk);
+        if (!ge) {
+          ge = h('div', { class: 'grp', role: 'presentation' });
+          els.set(gk, ge);
+        }
+        const lab = typeof g.label === 'string'
+          ? `<span class="gl">${g.icon || ''}${esc(g.label)}</span>`
+          : `<span class="gn">${g.label.big}</span><span class="gl">${esc(g.label.small)}</span>`;
+        if (ge._h !== lab) { ge.innerHTML = lab; ge._h = lab; }
+        nodes.push(ge); seen.add(gk);
+      }
+      for (const id of g.rows) pushRow(id, { depth: 0, parent: S.parentOf(id) }, true);
+    }
+  }
+  for (const k of [...els.keys()]) if (!seen.has(k)) els.delete(k);
+  reconcile(box, nodes);
+  if (active && active.isConnected && document.activeElement !== active && active !== document.body) active.focus({ preventScroll: true });
+  renderEmpty();
+  play(before);
+  queueStrikes();
+  lastToday = today();
+}
+export const dayChanged = () => lastToday && lastToday !== today();
+
+function renderHead() {
+  const r = st.route;
+  const title = $('#ptitle'), sub = $('#psub'), crumbs = $('#crumbs'), pn = $('#pnotes'), stack = $('#stack');
+  const names = { inbox: 'Inbox', today: 'Today', upcoming: 'Upcoming', someday: 'Someday', logbook: 'Logbook', trash: 'Trash' };
+  let depth = 0;
+  crumbs.replaceChildren();
+  if (r.view === 'node') {
+    const anc = S.ancestors(r.id);
+    depth = anc.length + 1;
+    for (const a of anc) crumbs.append(h('a', { href: '#/' + (a === S.INBOX ? 'inbox' : 'n/' + a), class: 'crumb' }, a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled'));
+    const t = S.val(r.id, 'title');
+    if (document.activeElement !== title) title.textContent = t;
+    title.contentEditable = CE;
+    title.dataset.ph = 'Untitled';
+    const n = S.val(r.id, 'notes');
+    if (document.activeElement !== pn) pn.textContent = n;
+    pn.hidden = false; pn.contentEditable = CE;
+    const open = S.countOpen(r.id);
+    sub.textContent = open ? `${open} open` : S.hasChildren(r.id) ? 'All done' : '';
+  } else {
+    title.textContent = names[r.view] || '';
+    title.contentEditable = 'false';
+    pn.hidden = true;
+    if (r.view === 'today') sub.textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    else if (r.view === 'inbox') { const n = S.countOpen(S.INBOX); sub.textContent = n ? `${n} open` : ''; }
+    else sub.textContent = '';
+  }
+  document.title = (r.view === 'node' ? S.val(r.id, 'title') || 'Untitled' : names[r.view]) + ' — Lists';
+  // Paper stack: one sheet edge per level of depth.
+  const n = Math.min(depth, 6);
+  if (stack.childElementCount !== n) stack.replaceChildren(...Array.from({ length: n }, () => h('i')));
+  stack.dataset.more = depth > 6 ? String(depth) : '';
+  document.body.dataset.view = r.view;
+  document.body.dataset.depth = String(depth);
+}
+
+function renderEmpty() {
+  const e = $('#empty');
+  const v = st.route.view;
+  e.replaceChildren();
+  e.className = 'empty';
+  e.hidden = st.rows.length > 0;
+  if (v === 'today') {
+    const doneToday = S.qDoneToday(todayStart());
+    const open = S.qToday(today());
+    if (!open.day.length && !open.eve.length && doneToday.length) {
+      // "Today, struck through": handled by main (needs the light); here only the words.
+      e.hidden = false;
+      e.className = 'empty clear';
+      e.append(h('p', { class: 'big' }, 'Today is clear.'), h('p', { class: 'cnt' }, `${doneToday.length} done`));
+      return;
+    }
+  }
+  if (!e.hidden) {
+    const key = st.touch ? 'Tap ＋ to add one.' : 'Press Q to add one, or Enter to start typing.';
+    const msg = {
+      inbox: ['Inbox is empty.', key],
+      today: ['Nothing scheduled for today.', st.touch ? 'Tap ＋ to add one.' : 'Press Q to add one.'],
+      upcoming: ['Nothing coming up.', 'Give an item a date and it shows here.'],
+      someday: ['Nothing for someday.', 'Items without a date, kept for later.'],
+      logbook: ['No completed items yet.', ''],
+      trash: ['Trash is empty.', ''],
+      node: ['Empty.', key],
+    }[v] || ['', ''];
+    e.append(h('p', { class: 'big' }, msg[0]), msg[1] ? h('p', null, msg[1]) : null);
+  }
+}
+
+/* ---------------- sidebar ---------------- */
+export function renderSide() {
+  const t = today();
+  const td = S.qToday(t);
+  const counts = { inbox: S.children(S.INBOX).filter((c) => !S.val(c, 'done')).length, today: td.day.length + td.eve.length };
+  for (const b of document.querySelectorAll('[data-nav]')) {
+    const v = b.dataset.nav;
+    const on = st.route.view === v || (v === 'inbox' && st.route.view === 'node' && S.ancestors(st.route.id)[0] === S.INBOX);
+    b.classList.toggle('on', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    const c = b.querySelector('.n');
+    if (c) c.textContent = counts[v] ? String(counts[v]) : '';
+  }
+  const box = $('#sideLists');
+  const lists = S.children(S.ROOT).filter((id) => id !== S.INBOX);
+  const top = st.route.view === 'node' ? [...S.ancestors(st.route.id), st.route.id][0] : null;
+  const items = lists.map((id) => {
+    let b = box.querySelector(`[data-list="${CSS.escape(id)}"]`);
+    if (!b) b = h('a', { class: 'li', 'data-list': id, href: '#/n/' + id }, h('span', { class: 'lt' }), h('span', { class: 'n' }));
+    b.querySelector('.lt').textContent = S.val(id, 'title') || 'Untitled';
+    const n = S.countOpen(id);
+    b.querySelector('.n').textContent = n ? String(n) : '';
+    b.classList.toggle('on', top === id);
+    if (top === id) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    return b;
+  });
+  reconcile(box, items);
+}
+
+/** View Transition wrapper (pointer-driven navigation only). */
+export function transition(fn, kind) {
+  if (!document.startViewTransition || st.reduced || kind === 'key') { fn(); return; }
+  document.documentElement.dataset.vt = kind || 'nav';
+  const t = document.startViewTransition(fn);
+  t.finished.finally(() => { delete document.documentElement.dataset.vt; });
+}
