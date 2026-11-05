@@ -5,7 +5,10 @@
 :root { --side-w: 264px; --row-h: 34px; }
 .sheet { max-width: 800px; padding: 64px 56px 0; }
 .ptitle { font-size: 32px; line-height: 38px; }
-.stack { top: 30px; left: 48px; right: 48px; }
+.stack { left: -18px; }
+/* Modals centre on the content column, not the whole window (S3-12). */
+.lyr.modal .panel { left: calc(var(--side-w) + (100vw - var(--side-w)) / 2); }
+@media (hover: hover) and (pointer: fine) { .row:not(.heading) { cursor: grab; } .row .tx { cursor: text; } }
 
 @media (hover: hover) and (pointer: fine) {
   .nv:hover, .li:hover, .icon-btn:hover, .sync:hover { background: var(--hover); }

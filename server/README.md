@@ -1,11 +1,11 @@
 # lists-sync
 
-The sync backend for Lists, plus the notes the client (`src/js/sync.js`) depends on. It is about 360 lines of Python stdlib (`ThreadingHTTPServer` and `sqlite3` in WAL mode). It stores **ciphertext only**: each row is a record id, a version and an opaque blob, inside a vault addressed by `SHA-256(authToken)`. The design comes from `docs/research/04-architecture.md` §3, §4 and §8.
+The sync backend for Lists, plus the notes the client (`src/js/sync.js`) depends on. It is about 540 lines of Python stdlib (`ThreadingHTTPServer` and `sqlite3` in WAL mode). It stores **ciphertext only**: each row is a record id, a version and an opaque blob, inside a vault addressed by `SHA-256(authToken)`. The design comes from `docs/research/04-architecture.md` §3, §4 and §8.
 
 | | |
 |---|---|
 | Runtime | `python:3.12-alpine`, non-root (uid 10001), data in the `/data` volume |
-| Memory | about 22 MB RSS after a 2,500-row push (unit test); `docker stats` showed 14 MiB against the 64 MiB limit |
+| Memory | 22–23 MB RSS typical (unit test, after a 2,500-row push). Worst case measured under a hostile load (4 clients pushing 2 MB-inflated bodies non-stop plus 3 sending gzip bombs): about 40 MB peak, against the 64 MiB limit. A gzip bomb from an unknown token costs < 1 MB (unit test) |
 | Client | `src/js/sync.js`, 3.4 KB min+gzip, no dependencies |
 
 ## HTTP API
@@ -37,37 +37,50 @@ Everything below runs in one `BEGIN IMMEDIATE` transaction:
    - A purge marker (`b: null`) deletes every older version of its record.
 3. **Pull.** Returns rows with `seq > since` pushed by *other* devices, so a device never gets its own rows back. Pages are 500 rows or about 512 KB. `more: true` means another page exists, and `cursor` is the last row returned. Otherwise `cursor = max(head, since)`.
 4. **Device position.** Records `since` as the device's confirmed position. GC uses it.
-5. **Reset.** Returns `reset` if `0 < since < horizon` (the device slept through a GC), or if `since` is beyond any sequence this server has issued (for example, after a restore from an older backup).
+5. **Reset.** Returns `reset` if `0 < since < horizon` (the device slept through a GC), or if `since` is beyond the last sequence this vault has issued (for example, after a restore from an older backup).
+
+**Sequences are per vault.** `seq`, `cursor` and `head` count only this vault's pushes (`vaults.next_seq`, bumped inside the transaction), so they say nothing about other users' activity. `head` is the last seq this vault issued, even if that row has since been compacted away.
 
 Status codes:
 
 | Code | When |
 |---|---|
-| 400 | Malformed JSON or gzip, or a bad field: `dev` must be `[A-Za-z0-9_-]{1,64}`, `since` a non-negative int, `push` at most 1,000 rows, `id` at most 128 chars, `v` at most 64 chars, `b` at most 90 KiB of base64url |
-| 401 | Bad or missing token, or an unknown vault without `create` |
+| 400 | Malformed JSON or gzip, or a bad field: `dev` must be `[A-Za-z0-9_-]{1,64}`, `since` a non-negative int, `push` at most 1,000 rows, `id` at most 128 chars, `v` at most 64 chars, `b` at most 90 KiB of unpadded base64url (`[A-Za-z0-9_-]`) |
+| 401 | Bad or missing token, or an unknown vault without a well-formed `create` (any body problem on an unknown token is a 401 too) |
 | 411 | No `Content-Length` (chunked bodies are refused) |
-| 413 | Body over 2 MB on the wire, or over 8 MB after gunzip |
+| 413 | Body over 512 KB on the wire, or over 2 MB after gunzip (known vaults; the client sends ≤ ~260 KB) |
 | 415 | `Content-Encoding` other than gzip or identity |
-| 429 | Rate limited. Includes `Retry-After` |
-| 503 | Busy for more than 10 s. At most 2 bodies are processed at once, which bounds peak RAM |
+| 429 | Rate limited (see below). Includes `Retry-After` |
+| 503 | No body slot free within 2 s. Includes `Retry-After: 2` |
+| 507 | `{"error":"vault full"}`: the push would take the vault over its quota (the whole push is rolled back). `{"error":"server full"}`: the database is over the disk guard; pushes and new vaults are refused, pulls still work |
 
 ### `DELETE /api/vault` → `200 {"ok":true}`
 Wipes the vault's rows, devices and token hash. This backs "Unpair and erase". After it, the same token gets 401 (unless it sends `create` again), so a still-paired second device stops instead of silently re-seeding a partial vault.
 
 ### Vault creation and limits
+- **Order of work.** The bearer token is checked and its vault looked up (`SHA-256` → indexed read) **before any byte of the body is read**. What happens next depends on the answer:
+  - **Known vault:** served whatever the IP's failure count (a 256-bit token can't be guessed, so locking out an IP would only hurt its owner). It has its own budget: 60 requests per minute (`LISTS_VAULT_RPM`), then 429. The body is read into one of **2** slots (512 KB wire, 2 MB inflated).
+  - **Unknown token:** 429 without reading if the IP is over its failure limit or its new-vault quota. Otherwise the body is read into a **single** separate slot (512 KB wire, **1 MB** inflated). Unless it is a well-formed `"create": true`, the answer is 401 and the IP gets a failure.
+- **Body slots** are taken *before* reading, held through the reply, and never queued for more than 2 s (then 503). A whole body must arrive within 15 s, so a trickled upload gives its slot back. Unknown tokens can't starve known vaults, or the reverse. At most 64 connections are open at once; more are dropped at accept.
+- **Inflate** uses `zlib.decompressobj(...).decompress(data, cap + 1)`, which stops at the cap however small the input. JSON with more than 20,000 commas is refused before parsing, so a flood of tiny values can't amplify memory.
 - **Creation.** A vault is created on its **first sync**, but only when that request carries `"create": true`.
   - The client sends `create` only from the device that ran `createVault()`, until its first success.
   - A device that `join()`s never sends it. A mistyped pairing code therefore fails with 401 instead of creating an empty vault.
 - **New vaults:** 5 per client IP per hour (`LISTS_NEW_VAULTS`), then 429.
-- **Failed auth** (malformed token, unknown vault): 10 per IP per 10 minutes (`LISTS_FAIL_MAX`). After that, *every* request from that IP gets 429 until the window passes.
-- **Client IP** comes from `X-Real-IP`, which Caddy sets with `header_up X-Real-IP {remote_host}`. That overwrites any value the client sent; this was checked through a real Caddy, where spoofed headers still hit the limit.
-- **Storage.** The counters are in memory and bounded.
+- **Failed auth** (malformed token, unknown vault, or any bad body from an unknown token): 10 per IP per 10 minutes (`LISTS_FAIL_MAX`). After that the IP gets 429 for malformed and unknown tokens; known vaults are unaffected.
+- **Quotas per vault:** 50 MB (`LISTS_VAULT_MB`) and 100,000 rows (`LISTS_VAULT_ROWS`), counted as `len(id)+len(v)+len(dev)+len(b)+48` per stored row in `vaults.nrows/nbytes`, kept exact inside the same transaction (compaction and GC subtract). A push that would grow a vault past either limit gets 507 and is rolled back; a push that doesn't grow it (compaction) still goes through. One user's lists are a few MB.
+- **Disk guard:** if the pages in use (`page_count − freelist_count`) exceed 500 MB (`LISTS_DB_MAX_MB`), pushes and new vaults get 507 `server full`.
+- **Client IP.** `X-Real-IP` is believed only when the TCP peer is in `LISTS_TRUSTED_PROXIES` (comma-separated IPs, CIDRs or hostnames; hostnames are re-resolved every 60 s). Empty, the default, trusts nobody and uses the peer address. The compose file sets `n8n-caddy-1`: n8n_default (172.18.0.0/16) also hosts other apps, which must not be able to pick their own rate-limit key. Caddy sets the header with `header_up X-Real-IP {remote_host}`, overwriting anything the client sent. IPv6 clients are keyed by /64.
+- **Storage.** The rate counters are in memory and bounded.
 - **GC.** An hourly thread drops purge markers once every device seen in the last 90 days has a confirmed position past them, then raises the vault's `horizon`.
 
+### Schema migration
+`PRAGMA user_version` is 2. A v1 database (one `AUTOINCREMENT` seq shared by all vaults) is migrated on start, in one transaction: every row is kept and renumbered per vault starting above the old global top, the `horizon` is set at that boundary, and quota counters are filled in. Every cursor a client still holds is then below the horizon or beyond the head, so it gets `{reset: true}` and re-pulls from 0 (the client already handles that). The live database was empty when this shipped.
+
 ### Process
-- Env vars: `LISTS_DB` (`/data/lists.db`), `LISTS_PORT` (8787; use `0` for a random port, which is printed on stdout), `LISTS_HOST` (`0.0.0.0`).
+- Env vars: `LISTS_DB` (`/data/lists.db`), `LISTS_PORT` (8787; use `0` for a random port, which is printed on stdout), `LISTS_HOST` (`0.0.0.0`), `LISTS_TRUSTED_PROXIES` (empty), `LISTS_FAIL_MAX` (10), `LISTS_NEW_VAULTS` (5), `LISTS_VAULT_RPM` (60), `LISTS_VAULT_MB` (50), `LISTS_VAULT_ROWS` (100000), `LISTS_DB_MAX_MB` (500).
 - **SIGTERM** stops accepting connections, waits up to 5 s for in-flight requests, checkpoints the WAL and exits 0.
-- Socket reads time out after 20 s, so a slow client can't pin a thread.
+- Socket reads time out after 20 s, and a whole body must arrive within 15 s, so a slow client can't pin a thread or a body slot.
 - Request logs are off, because Caddy logs requests.
 
 ## Client: `src/js/sync.js`
@@ -177,9 +190,14 @@ curl -s https://lists.remypost.me/api/health   # {"ok":true}
 ## Tests
 
 ```sh
-python3 -m unittest server/test_sync_server.py -v        # 24 tests: idempotency, paging (rows and bytes), no-echo,
+python3 -m unittest discover -s server -p 'test_*.py'    # 44 tests: idempotency, paging (rows and bytes), no-echo,
                                                           # compaction, interleaving, purge/GC/reset, auth failures and
                                                           # 429, new-vault limit, validation, body limits, gzip, 411/415,
-                                                          # concurrency, SIGTERM exit 0 and RSS < 30 MB
+                                                          # concurrency, SIGTERM exit 0 and RSS < 30 MB; and for the
+                                                          # 2026-11-05 review: gzip bomb from an unknown token (401 in
+                                                          # ms, RSS +<1 MB), no body read without quota, body slots/503,
+                                                          # slow-body deadline, quotas/507 + rollback, disk guard,
+                                                          # per-vault rate limit, per-vault seq, v1 migration, trusted
+                                                          # proxies, valid token served while its IP is locked out
 node --test tests/unit/sync.test.mjs                      # 19 tests against a real server process (random port, temp db)
 ```

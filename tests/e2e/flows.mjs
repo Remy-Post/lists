@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 import { join } from 'node:path';
 import { build, startStatic, ready, app, sleep, killAll, checker, CHROME_ARGS, OUT } from './lib.mjs';
 
-const ONLY = process.env.ONLY ? process.env.ONLY.split(',') : ['desk', 'phone', 'tabs'];
+const ONLY = process.env.ONLY ? process.env.ONLY.split(',') : ['desk', 'phone', 'tabs', 'sw'];
 const MAC = { viewport: { width: 1728, height: 1000 }, deviceScaleFactor: 2 };
 const S25 = { viewport: { width: 412, height: 891 }, deviceScaleFactor: 3.5, isMobile: true, hasTouch: true, userAgent: 'Mozilla/5.0 (Linux; Android 15; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36' };
 // The service worker's first-visit self-reload (a bug, see net3g) would race the scripted input, so flows block it.
@@ -409,6 +409,23 @@ if (ONLY.includes('phone')) {
     await page.screenshot({ path: join(OUT, 'flows-cleared-phone.png') });
     C.ok(s.cleared && /Today is clear\./.test(s.text), 'tapping every box in Today shows "Today is clear."', s);
   });
+  await ctx.close();
+}
+
+/* ====================================================================== first visit with the service worker */
+if (ONLY.includes('sw')) {
+  console.log('\n== first visit with the service worker allowed');
+  const ctx = await browser.newContext({ ...MAC });
+  const page = await ctx.newPage();
+  let navs = 0;
+  page.on('framenavigated', (f) => { if (f === page.mainFrame()) navs++; });
+  await page.goto(srv.url + '/#/today'); await ready(page);
+  const text = 'typed during the first visit';
+  await press(page, 'j', 'o');
+  await page.keyboard.type(text, { delay: 40 });
+  await sleep(2500);
+  const got = await page.evaluate((t) => { const { S } = window.__lists; for (const [id] of S.recs) { const v = S.val(id, 'title'); if (v && t.startsWith(v.slice(0, 5)) && v.length < 60) return v; } return null; }, text);
+  C.ok(navs === 1 && got === text, 'typing right after the first load is not cut off by the service worker taking control (no self-reload)', { navigations: navs, persistedTitle: got });
   await ctx.close();
 }
 

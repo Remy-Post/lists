@@ -30,6 +30,7 @@ export const commands = [
   { id: 'below', label: 'New item below', keys: ['o'], group: 'Capture', run: () => newNear(1) },
   { id: 'above', label: 'New item above', keys: ['O'], group: 'Capture', run: () => newNear(0) },
   { id: 'edit', label: 'Edit title', keys: ['Enter', 'i'], group: 'Capture', when: 'nav', test: needSel, run: () => focusRow(st.cursor, { edit: true }) },
+  { id: 'first-item', label: 'Start the first item', keys: ['Enter'], group: 'Capture', when: 'nav', hidden: true, test: () => !st.rows.length && !!pageRoot(), run: () => newNear(1) },
   { id: 'newlist', label: 'New list', keys: [], group: 'Capture', run: () => { const id = A.newList(); ui.go({ view: 'node', id }, 'key'); setTimeout(() => ui.editTitle(), 0); } },
   // Act
   { id: 'done', label: 'Complete', keys: ['x', 'Mod+Enter'], group: 'Act', test: needSel, run: () => { A.toggleDone(); renderPage(); renderSide(); } },
@@ -49,8 +50,8 @@ export const commands = [
   { id: 'del', label: 'Delete', keys: ['Backspace', 'Delete', 'Mod+Backspace'], group: 'Act', test: needSel, when: 'nav', run: () => del() },
   { id: 'rescue', label: 'Move overdue to Today', keys: [], group: 'Act', run: () => { const n = A.rescueOverdue(); renderPage(); renderSide(); ui.toast(n ? `Moved ${n} to Today` : 'Nothing overdue', { undo: !!n }); } },
   // Structure
-  { id: 'indent', label: 'Indent', keys: ['Tab'], group: 'Structure', when: 'nav', test: needSel, run: keepFocus(() => A.indent()) },
-  { id: 'outdent', label: 'Outdent', keys: ['Shift+Tab'], group: 'Structure', when: 'nav', test: needSel, run: keepFocus(() => A.outdent()) },
+  { id: 'indent', label: 'Indent', keys: ['Tab', 'Alt+Shift+ArrowRight'], group: 'Structure', when: 'nav', test: needSel, run: keepFocus(() => A.indent()) },
+  { id: 'outdent', label: 'Outdent', keys: ['Shift+Tab', 'Alt+Shift+ArrowLeft'], group: 'Structure', when: 'nav', test: needSel, run: keepFocus(() => A.outdent()) },
   { id: 'up', label: 'Move up', keys: ['Alt+Shift+ArrowUp', 'Mod+Shift+ArrowUp'], group: 'Structure', test: needSel, run: keepFocus(() => A.moveBy(-1)) },
   { id: 'down', label: 'Move down', keys: ['Alt+Shift+ArrowDown', 'Mod+Shift+ArrowDown'], group: 'Structure', test: needSel, run: keepFocus(() => A.moveBy(1)) },
   { id: 'expand', label: 'Expand', keys: ['ArrowRight', 'l'], group: 'Structure', when: 'nav', run: () => horiz(1) },
@@ -165,7 +166,10 @@ export function wireKeys() {
     if (ui.modalOpen() && !['Mod+k', 'Escape'].includes(combo(e))) return;
     const c = combo(e);
     // Focus on a control outside the list (sidebar link, button): keep its native keys (audit S2-3).
-    const outside = !typing && t && t !== document.body && !(t.closest && t.closest('#outline'));
+    st.keyAt = performance.now();
+    const outside = !typing && t && t !== document.body && !(t.closest && (t.closest('#outline') || t.id === 'main'));
+    // A focused control keeps its keys, and single characters never fire from it (WCAG 2.1.4, a11y-16).
+    if (outside && !/^(Mod|Alt)\+/.test(c) && c !== 'Escape') return;
     // While typing, only modified chords (and Escape) reach the registry.
     if (typing) {
       if (!(c.startsWith('Mod+') || c.startsWith('Alt+') || c === 'Escape')) return;

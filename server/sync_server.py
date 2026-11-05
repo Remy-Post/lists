@@ -5,36 +5,47 @@ The server never sees plaintext. Each row is (record id, version, opaque blob)
 inside a vault, and a vault is addressed by SHA-256(authToken). Protocol and
 limits: see server/README.md and docs/research/04-architecture.md §3, §4, §8.
 """
-import gzip, hashlib, hmac, io, json, os, re, signal, sqlite3, sys, threading, time
+import contextlib, hashlib, ipaddress, json, os, re, signal, socket, sqlite3, sys, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 E = os.environ.get
-MAX_BODY = 2 << 20        # bytes on the wire (compressed or not) -> 413 above this
-MAX_INFL = 8 << 20        # inflated gzip body cap (zip-bomb guard) -> 413
+MAX_BODY = 512 << 10      # bytes on the wire per request -> 413 (the client sends <= ~260 KB)
+MAX_INFL = 2 << 20        # inflated body cap for a known vault -> 413
+ANON_INFL = 1 << 20       # inflated body cap for an unknown token (maybe a first sync) -> 401
+BODY_SECS = 15            # whole-body read deadline, so a trickled upload gives its slot back
+BODIES = 2                # known-vault requests holding a body at once (bounds peak RAM)
+ANON_BODIES = 1           # unknown-token requests holding a body at once
+SLOT_WAIT = 2             # seconds to wait for a body slot, then 503 + Retry-After
+MAX_CONN = 64             # open connections (one thread each); more are dropped at accept
 MAX_PUSH = 1000           # rows per push
 MAX_BLOB = 90 * 1024      # chars of base64url per row (~64 KB of ciphertext)
+MAX_COMMAS = 20 * MAX_PUSH  # bounds the JSON value count, so parsing can't amplify memory
 PAGE_ROWS = 500           # rows per pull page
 PAGE_BYTES = 512 << 10    # approx bytes per pull page
 GC_DAYS = 90              # devices unseen this long stop holding back GC
-WORKERS = 2               # concurrent POST bodies being processed (bounds peak RAM)
 TOKEN = re.compile(r"[0-9a-f]{64}\Z")          # hex(HKDF-SHA256, 256 bit)
 DEV = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+B64 = re.compile(r"[A-Za-z0-9_-]+\Z")           # base64url, unpadded
+ROW_COST = 48                                   # per-row overhead counted against the quota
+COST = f"length(rid)+length(ver)+length(dev)+COALESCE(length(blob),0)+{ROW_COST}"
+VERSION = 2                                     # PRAGMA user_version
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
+CHANGES = """CREATE TABLE {name}(
+  vault INTEGER NOT NULL, seq INTEGER NOT NULL,  -- seq is per vault: no signal across vaults
+  rid TEXT NOT NULL, ver TEXT NOT NULL,
+  dev TEXT NOT NULL, blob TEXT,                  -- NULL blob = purge marker
+  UNIQUE(vault, seq), UNIQUE(vault, rid, ver))"""
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS vaults(
   id INTEGER PRIMARY KEY, token_sha256 BLOB NOT NULL UNIQUE,
-  horizon INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS changes(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  vault INTEGER NOT NULL, rid TEXT NOT NULL, ver TEXT NOT NULL,
-  dev TEXT NOT NULL, blob TEXT,              -- NULL blob = purge marker
-  UNIQUE(vault, rid, ver));
-CREATE INDEX IF NOT EXISTS changes_by_seq ON changes(vault, seq);
+  horizon INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL,
+  next_seq INTEGER NOT NULL DEFAULT 1, nrows INTEGER NOT NULL DEFAULT 0, nbytes INTEGER NOT NULL DEFAULT 0);
+{CHANGES.format(name="IF NOT EXISTS changes")};
 CREATE INDEX IF NOT EXISTS changes_by_rid ON changes(vault, rid, seq);
 CREATE TABLE IF NOT EXISTS devices(
   vault INTEGER NOT NULL, dev TEXT NOT NULL, cursor INTEGER NOT NULL,
   seen INTEGER NOT NULL, PRIMARY KEY(vault, dev));
+PRAGMA user_version={VERSION};
 """
 
 
@@ -44,16 +55,66 @@ class Bad(Exception):
         super().__init__(msg); self.code, self.msg, self.retry = code, msg, retry
 
 
+def cost(rid, ver, dev, blob):
+    return len(rid) + len(ver) + len(dev) + len(blob or "") + ROW_COST
+
+
 class Store:
     """One SQLite connection in WAL mode, serialised by a lock (one user: plenty)."""
 
-    def __init__(self, path):
+    def __init__(self, path, vault_bytes=50 << 20, vault_rows=100_000, db_max=500 << 20):
+        self.max_bytes, self.max_rows, self.db_max = vault_bytes, vault_rows, db_max
         self.c = sqlite3.connect(path, timeout=10, isolation_level=None, check_same_thread=False)
-        self.c.executescript(SCHEMA)
+        self.c.execute("PRAGMA journal_mode=WAL")
         self.c.execute("PRAGMA synchronous=NORMAL")
         self.c.execute("PRAGMA cache_size=-2000")      # 2 MB page cache
         self.c.execute("PRAGMA busy_timeout=10000")
         self.lock = threading.Lock()
+        ver = self.c.execute("PRAGMA user_version").fetchone()[0]
+        if ver < VERSION and self.c.execute("SELECT 1 FROM sqlite_master WHERE name='changes'").fetchone():
+            self.migrate_v1()
+        self.c.executescript(SCHEMA)
+
+    def migrate_v1(self):
+        """v1 had one AUTOINCREMENT seq shared by every vault. Renumber per vault, keeping every row.
+
+        New seqs start above every v1 seq, and the horizon sits at that boundary, so any cursor a
+        client still holds (0 < since <= old top) gets {reset: true} and re-pulls from 0; since=0
+        pulls normally and lands at or above the horizon. Quota counters are filled in.
+        """
+        c = self.c
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            top = c.execute("SELECT COALESCE(MAX(seq),0) FROM changes").fetchone()[0]
+            if c.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+                top = max(top, c.execute("SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence "
+                                         "WHERE name='changes'").fetchone()[0])
+            base = top + 1
+            cols = {r[1] for r in c.execute("PRAGMA table_info(vaults)")}
+            for col in ("next_seq INTEGER NOT NULL DEFAULT 1", "nrows INTEGER NOT NULL DEFAULT 0",
+                        "nbytes INTEGER NOT NULL DEFAULT 0"):
+                if col.split()[0] not in cols:
+                    c.execute(f"ALTER TABLE vaults ADD COLUMN {col}")
+            c.execute(CHANGES.format(name="changes_v2"))
+            c.execute("INSERT INTO changes_v2(vault,seq,rid,ver,dev,blob) SELECT vault, "
+                      "?+ROW_NUMBER() OVER (PARTITION BY vault ORDER BY seq), rid, ver, dev, blob "
+                      "FROM changes WHERE vault IN (SELECT id FROM vaults)", (base,))
+            c.execute("DROP TABLE changes")
+            if c.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+                c.execute("DELETE FROM sqlite_sequence WHERE name='changes'")
+            c.execute("ALTER TABLE changes_v2 RENAME TO changes")
+            c.execute("CREATE INDEX changes_by_rid ON changes(vault, rid, seq)")
+            c.execute(f"""UPDATE vaults SET horizon=?,
+                nrows=(SELECT COUNT(*) FROM changes WHERE vault=vaults.id),
+                nbytes=(SELECT COALESCE(SUM({COST}),0) FROM changes WHERE vault=vaults.id),
+                next_seq=?+1+(SELECT COUNT(*) FROM changes WHERE vault=vaults.id)""", (base, base))
+            c.execute("UPDATE devices SET cursor=0")       # v1 positions mean nothing now
+            c.execute(f"PRAGMA user_version={VERSION}")
+        except BaseException:
+            c.execute("ROLLBACK"); raise
+        c.execute("COMMIT")
+        n = c.execute("SELECT COUNT(*), (SELECT COUNT(*) FROM vaults) FROM changes").fetchone()
+        print(f"lists-sync: migrated to per-vault seq ({n[0]} rows, {n[1]} vaults, base {base})", file=sys.stderr, flush=True)
 
     def tx(self, fn):
         with self.lock:
@@ -69,32 +130,54 @@ class Store:
         with self.lock:
             self.c.execute("SELECT 1").fetchone()
 
-    def vault(self, digest, create=False):
-        """-> (id, horizon) or None. Creates the vault when asked to."""
+    def lookup(self, digest):
+        """-> vault id or None. A plain indexed read: no body has been read yet."""
+        with self.lock:
+            row = self.c.execute("SELECT id FROM vaults WHERE token_sha256=?", (digest,)).fetchone()
+        return row[0] if row else None
+
+    def used(self, c):
+        """Bytes of the database actually in use (free pages are reused, so they don't count)."""
+        n = c.execute("PRAGMA page_count").fetchone()[0] - c.execute("PRAGMA freelist_count").fetchone()[0]
+        return n * c.execute("PRAGMA page_size").fetchone()[0]
+
+    def create(self, digest):
         def run(c):
-            row = c.execute("SELECT id, token_sha256, horizon FROM vaults WHERE token_sha256=?",
-                            (digest,)).fetchone()
-            if row and hmac.compare_digest(row[1], digest):
-                return row[0], row[2]
-            if not create:
-                return None
-            cur = c.execute("INSERT INTO vaults(token_sha256, created) VALUES(?,?)", (digest, int(time.time())))
-            return cur.lastrowid, 0
+            row = c.execute("SELECT id FROM vaults WHERE token_sha256=?", (digest,)).fetchone()
+            if row: return row[0]                 # a concurrent first sync won the race
+            if self.used(c) > self.db_max: raise Bad(507, "server full")
+            return c.execute("INSERT INTO vaults(token_sha256, created) VALUES(?,?)",
+                             (digest, int(time.time()))).lastrowid
         return self.tx(run)
 
-    def sync(self, vid, horizon, dev, since, push, pull):
+    def sync(self, vid, dev, since, push, pull):
         def run(c):
-            top = c.execute("SELECT seq FROM sqlite_sequence WHERE name='changes'").fetchone()
-            if 0 < since < horizon or since > (top[0] if top else 0):
-                return {"reset": True}     # slept through a GC, or a cursor from another server
+            row = c.execute("SELECT horizon, next_seq, nrows, nbytes FROM vaults WHERE id=?", (vid,)).fetchone()
+            if not row: raise Bad(401, "unauthorized")    # erased while this request waited
+            horizon, nxt, nrows, nbytes = row
+            if 0 < since < horizon or since >= nxt:
+                return {"reset": True}     # slept through a GC, or a cursor this vault never issued
+            if push and self.used(c) > self.db_max: raise Bad(507, "server full")
+            first, r0, b0 = nxt, nrows, nbytes
             for rid, ver, blob in push:
-                cur = c.execute("INSERT OR IGNORE INTO changes(vault,rid,ver,dev,blob) VALUES(?,?,?,?,?)",
-                                (vid, rid, ver, dev, blob))
-                if cur.rowcount:           # a new version: drop what it supersedes
-                    # purge marker: every older version goes. Otherwise the client had merged
-                    # everything up to `since`, so versions at or below it are superseded.
-                    lim = cur.lastrowid if blob is None else since + 1
+                cur = c.execute("INSERT OR IGNORE INTO changes(vault,seq,rid,ver,dev,blob) VALUES(?,?,?,?,?,?)",
+                                (vid, nxt, rid, ver, dev, blob))
+                if not cur.rowcount: continue       # a retry: already stored
+                nrows, nbytes = nrows + 1, nbytes + cost(rid, ver, dev, blob)
+                # A new version drops what it supersedes. Purge marker: every older version goes.
+                # Otherwise the client had merged everything up to `since`, so versions at or below it go.
+                lim = nxt if blob is None else since + 1
+                nxt += 1
+                n, b = c.execute(f"SELECT COUNT(*), COALESCE(SUM({COST}),0) FROM changes "
+                                 "WHERE vault=? AND rid=? AND seq<?", (vid, rid, lim)).fetchone()
+                if n:
                     c.execute("DELETE FROM changes WHERE vault=? AND rid=? AND seq<?", (vid, rid, lim))
+                    nrows, nbytes = nrows - n, nbytes - b
+            if nxt != first:
+                # Over quota only refuses pushes that grow the vault; compaction still goes through.
+                if nrows > self.max_rows and nrows > r0 or nbytes > self.max_bytes and nbytes > b0:
+                    raise Bad(507, "vault full")    # rolls the whole push back
+                c.execute("UPDATE vaults SET next_seq=?, nrows=?, nbytes=? WHERE id=?", (nxt, nrows, nbytes, vid))
             rows, size, more = [], 0, False
             if pull:
                 q = c.execute("SELECT seq, rid, ver, blob FROM changes WHERE vault=? AND seq>? AND dev<>? "
@@ -105,8 +188,8 @@ class Store:
                     rows.append({"s": seq, "id": rid, "v": ver, "b": blob})
                     size += len(rid) + len(ver) + len(blob or "") + 40
                 q.close()
-            head = c.execute("SELECT COALESCE(MAX(seq),0) FROM changes WHERE vault=?", (vid,)).fetchone()[0]
-            cursor = rows[-1]["s"] if more else max(head, since) if pull else since
+            head = nxt - 1
+            cursor = rows[-1]["s"] if more else head if pull else since
             # The device has applied everything up to `since` (what it asks from), so that is
             # its confirmed position for GC, not the cursor we are about to hand it.
             c.execute("INSERT INTO devices VALUES(?,?,?,?) ON CONFLICT(vault,dev) DO UPDATE "
@@ -132,10 +215,12 @@ class Store:
                                 (vid, cutoff)).fetchone()[0]
                 if low is None:
                     return
-                n = c.execute("DELETE FROM changes WHERE vault=? AND blob IS NULL AND seq<=?",
-                              (vid, low)).rowcount
+                n, b = c.execute(f"SELECT COUNT(*), COALESCE(SUM({COST}),0) FROM changes "
+                                 "WHERE vault=? AND blob IS NULL AND seq<=?", (vid, low)).fetchone()
                 if n:
-                    c.execute("UPDATE vaults SET horizon=MAX(horizon,?) WHERE id=?", (low, vid))
+                    c.execute("DELETE FROM changes WHERE vault=? AND blob IS NULL AND seq<=?", (vid, low))
+                    c.execute("UPDATE vaults SET horizon=MAX(horizon,?), nrows=nrows-?, nbytes=nbytes-? "
+                              "WHERE id=?", (low, n, b, vid))
             self.tx(run)
 
     def close(self):
@@ -147,7 +232,7 @@ class Store:
 
 
 class Limiter:
-    """Sliding-window counter per key (client IP). In memory; bounded."""
+    """Sliding-window counter per key (client IP or vault). In memory; bounded."""
 
     def __init__(self, n, window):
         self.n, self.win, self.h, self.l = n, window, {}, threading.Lock()
@@ -167,12 +252,40 @@ class Limiter:
             self.h.setdefault(k, []).append(time.monotonic())
 
 
+class Proxies:
+    """Peers whose X-Real-IP is believed. LISTS_TRUSTED_PROXIES: comma-separated IPs, CIDRs or
+    hostnames (a container name such as n8n-caddy-1, re-resolved every 60 s). Empty = trust none."""
+
+    def __init__(self, spec):
+        self.nets, self.names = [], []
+        for s in (x.strip() for x in (spec or "").split(",")):
+            if not s: continue
+            try: self.nets.append(ipaddress.ip_network(s, strict=False))
+            except ValueError: self.names.append(s)
+        self.ips, self.at, self.l = frozenset(), -1e9, threading.Lock()
+
+    def resolved(self):
+        with self.l:
+            if self.names and time.monotonic() - self.at > 60:
+                ips = set()
+                for n in self.names:
+                    try: ips.update(ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(n, None))
+                    except (OSError, ValueError): pass
+                self.ips, self.at = frozenset(ips), time.monotonic()
+            return self.ips
+
+    def __contains__(self, peer):
+        try: a = ipaddress.ip_address(peer)
+        except ValueError: return False
+        return any(a in n for n in self.nets) or a in self.resolved()
+
+
 def parse(req):
     """Validate a sync request body -> (dev, since, push, pull, create)."""
     if not isinstance(req, dict): raise Bad(400, "bad request")
     dev, since, push = req.get("dev"), req.get("since", 0), req.get("push", [])
     if not isinstance(dev, str) or not DEV.match(dev): raise Bad(400, "bad dev")
-    if type(since) is not int or since < 0: raise Bad(400, "bad since")
+    if type(since) is not int or not 0 <= since < 1 << 62: raise Bad(400, "bad since")
     if not isinstance(push, list) or len(push) > MAX_PUSH: raise Bad(400, "bad push")
     out = []
     for r in push:
@@ -180,9 +293,18 @@ def parse(req):
         rid, ver, b = r.get("id"), r.get("v"), r.get("b")
         if not (isinstance(rid, str) and 0 < len(rid) <= 128 and isinstance(ver, str) and 0 < len(ver) <= 64):
             raise Bad(400, "bad row")
-        if b is not None and not (isinstance(b, str) and 0 < len(b) <= MAX_BLOB): raise Bad(400, "bad blob")
+        if b is not None and not (isinstance(b, str) and 0 < len(b) <= MAX_BLOB and B64.match(b)):
+            raise Bad(400, "bad blob")
         out.append((rid, ver, b))
     return dev, since, out, req.get("pull", True) is not False, req.get("create") is True
+
+
+@contextlib.contextmanager
+def slot(sem):
+    """Hold one of a bounded number of body slots; never queue for long."""
+    if not sem.acquire(timeout=SLOT_WAIT): raise Bad(503, "busy", 2)
+    try: yield
+    finally: sem.release()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -207,8 +329,17 @@ class Handler(BaseHTTPRequestHandler):
         return "lists-sync"
 
     def ip(self):
-        # Caddy sets X-Real-IP from the TCP peer (header_up), overwriting anything the client sent.
-        return (self.headers.get("X-Real-IP") or self.client_address[0]).strip()[:64]
+        """Rate-limit key. X-Real-IP only from a trusted proxy (Caddy sets it from the TCP peer);
+        IPv6 clients are grouped by /64, since one host usually holds the whole prefix."""
+        peer, real = self.client_address[0], self.headers.get("X-Real-IP")
+        a = None
+        if real and peer in self.server.proxies:
+            try: a = ipaddress.ip_address(real.strip())
+            except ValueError: pass
+        if a is None:
+            try: a = ipaddress.ip_address(peer)
+            except ValueError: return peer[:64]
+        return str(ipaddress.ip_network(f"{a}/64", strict=False)) if a.version == 6 else str(a)
 
     def route(self):
         return self.path.split("?", 1)[0]
@@ -229,36 +360,56 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             with srv.active_lock: srv.active -= 1
 
-    def token(self, ip):
-        """-> sha256(token) or raises 429/401. Failures count against the IP."""
+    def throttled(self, ip):
         wait = self.server.fails.wait(ip)
         if wait: raise Bad(429, "slow down", wait)
+
+    def fail(self, ip):
+        self.server.fails.hit(ip)
+        raise Bad(401, "unauthorized")
+
+    def token(self, ip):
+        """-> sha256(token). A malformed token is a failure: throttled per IP, then 401."""
         h = self.headers.get("Authorization", "")
         tok = h[7:].strip() if h.startswith("Bearer ") else ""
         if not TOKEN.match(tok):
-            self.server.fails.hit(ip); raise Bad(401, "unauthorized")
+            self.throttled(ip); self.fail(ip)
         return hashlib.sha256(tok.encode()).digest()   # 256-bit random token: a fast hash is fine
 
     def body(self):
+        """Read the whole body (<= MAX_BODY) within BODY_SECS. Call only while holding a slot."""
         if self.headers.get("Transfer-Encoding"): raise Bad(411, "length required")
         try: n = int(self.headers.get("Content-Length", ""))
         except ValueError: raise Bad(411, "length required")
         if n <= 0: raise Bad(400, "empty body")
         if n > MAX_BODY: raise Bad(413, "too large")
-        raw = self.rfile.read(n)
-        if len(raw) < n: raise ConnectionError("short body")
-        return raw
+        buf, end = bytearray(), time.monotonic() + BODY_SECS
+        while len(buf) < n:
+            left = end - time.monotonic()
+            if left <= 0: raise TimeoutError("slow body")
+            self.connection.settimeout(min(left, self.timeout))
+            chunk = self.rfile.read1(min(65536, n - len(buf)))
+            if not chunk: raise ConnectionError("short body")
+            buf += chunk
+        self.connection.settimeout(self.timeout)
+        return buf
 
-    def inflate(self, raw):
+    def inflate(self, raw, cap):
         enc = (self.headers.get("Content-Encoding") or "identity").strip().lower()
         if enc == "identity": return raw
         if enc != "gzip": raise Bad(415, "unsupported encoding")
-        try:
-            out = gzip.GzipFile(fileobj=io.BytesIO(raw)).read(MAX_INFL + 1)
-        except (OSError, EOFError, ValueError):
-            raise Bad(400, "bad gzip")
-        if len(out) > MAX_INFL: raise Bad(413, "too large")
+        d = zlib.decompressobj(wbits=31)               # gzip framing; stops after cap+1 bytes out
+        try: out = d.decompress(raw, cap + 1)
+        except zlib.error: raise Bad(400, "bad gzip")
+        if len(out) > cap: raise Bad(413, "too large")
+        if not d.eof: raise Bad(400, "bad gzip")       # truncated
         return out
+
+    def read_json(self, cap):
+        raw = self.inflate(self.body(), cap)
+        if raw.count(b",") > MAX_COMMAS: raise Bad(400, "bad request")
+        try: return json.loads(raw)
+        except (ValueError, RecursionError): raise Bad(400, "bad json")
 
     # --- endpoints ---
     def do_GET(self): self.guarded(self.get)
@@ -277,38 +428,45 @@ class Handler(BaseHTTPRequestHandler):
         if self.route() != "/api/sync": return self.reply(404, {"error": "not found"}, close=True)
         ip, srv = self.ip(), self.server
         digest = self.token(ip)
-        raw = self.body()
-        if not srv.workers.acquire(timeout=10): raise Bad(503, "busy")
-        try:
-            raw = self.inflate(raw)
-            try: req = json.loads(raw)
-            except ValueError: raise Bad(400, "bad json")
-            del raw
-            dev, since, push, pull, create = parse(req)
-            del req
-            who = srv.store.vault(digest)
-            if not who:
-                if not create:                  # unknown vault (typo'd pairing code, or erased)
-                    srv.fails.hit(ip); raise Bad(401, "unauthorized")
-                wait = srv.news.wait(ip)
-                if wait: raise Bad(429, "slow down", wait)
-                srv.news.hit(ip)
-                who = srv.store.vault(digest, create=True)
-            out = srv.store.sync(who[0], who[1], dev, since, push, pull)
-        finally:
-            srv.workers.release()
-        self.reply(200, out)
+        vid = srv.store.lookup(digest)            # before any byte of the body is read
+        if vid is not None:
+            # A known vault is served whatever the IP's failure count (a 256-bit token can't be
+            # guessed), but each vault gets a request budget of its own.
+            wait = srv.vrate.wait(vid)
+            if wait: raise Bad(429, "slow down", wait)
+            srv.vrate.hit(vid)
+            with slot(srv.bodies):
+                dev, since, push, pull, _ = parse(self.read_json(MAX_INFL))
+                self.reply(200, srv.store.sync(vid, dev, since, push, pull))
+            return
+        # Unknown token: only a first sync ("create": true) from an IP with quota left gets a
+        # body read at all, into a single small slot. Anything else is a failure and a 401.
+        self.throttled(ip)
+        wait = srv.news.wait(ip)
+        if wait: raise Bad(429, "slow down", wait)
+        with slot(srv.anon):
+            try:
+                dev, since, push, pull, create = parse(self.read_json(ANON_INFL))
+            except Bad:
+                create = False
+            except (TimeoutError, ConnectionError):
+                srv.fails.hit(ip); raise
+            if not create: self.fail(ip)
+            srv.news.hit(ip)
+            vid = srv.store.create(digest)
+            srv.vrate.hit(vid)
+            self.reply(200, srv.store.sync(vid, dev, since, push, pull))
 
     def delete(self):
         if self.route() != "/api/vault": return self.reply(404, {"error": "not found"}, close=True)
         ip, srv = self.ip(), self.server
         digest = self.token(ip)
-        if self.headers.get("Content-Length", "0") != "0": self.body()   # drain and ignore
-        who = srv.store.vault(digest)
-        if not who:
-            srv.fails.hit(ip); raise Bad(401, "unauthorized")
-        srv.store.wipe(who[0])
-        self.reply(200, {"ok": True})
+        vid = srv.store.lookup(digest)
+        if vid is None:
+            self.throttled(ip); self.fail(ip)
+        srv.store.wipe(vid)
+        # The body (the client sends none) is never read; close so it can't parse as a request.
+        self.reply(200, {"ok": True}, close=self.headers.get("Content-Length", "0") != "0")
 
     def log_message(self, fmt, *args):     # Caddy already logs requests
         pass
@@ -317,24 +475,42 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
+    def process_request(self, request, client_address):
+        if not self.conns.acquire(blocking=False):      # bounds threads, and so memory
+            self.shutdown_request(request); return
+        try: super().process_request(request, client_address)
+        except BaseException: self.conns.release(); raise
+
+    def process_request_thread(self, request, client_address):
+        try: super().process_request_thread(request, client_address)
+        finally: self.conns.release()
+
     def handle_error(self, request, client_address):
         if not isinstance(sys.exc_info()[1], OSError):      # resets and timeouts are routine
             super().handle_error(request, client_address)
 
 
-def make_server(db_path, host="0.0.0.0", port=8787, fail_max=10, new_max=5):
+def make_server(db_path, host="0.0.0.0", port=8787, fail_max=10, new_max=5, vault_rpm=60,
+                vault_bytes=50 << 20, vault_rows=100_000, db_max=500 << 20, proxies=""):
     srv = Server((host, port), Handler)
-    srv.store = Store(db_path)
+    srv.store = Store(db_path, vault_bytes, vault_rows, db_max)
     srv.fails = Limiter(fail_max, 600)         # bad/unknown tokens: N per IP per 10 min, then 429
     srv.news = Limiter(new_max, 3600)          # new vaults: N per IP per hour, then 429
-    srv.workers = threading.BoundedSemaphore(WORKERS)
+    srv.vrate = Limiter(vault_rpm, 60)         # requests per vault per minute, then 429
+    srv.proxies = Proxies(proxies)
+    srv.bodies = threading.BoundedSemaphore(BODIES)
+    srv.anon = threading.BoundedSemaphore(ANON_BODIES)
+    srv.conns = threading.BoundedSemaphore(MAX_CONN)
     srv.active, srv.active_lock = 0, threading.Lock()
     return srv
 
 
 def main():
-    srv = make_server(E("LISTS_DB", "/data/lists.db"), E("LISTS_HOST", "0.0.0.0"), int(E("LISTS_PORT", "8787")),
-                      int(E("LISTS_FAIL_MAX", "10")), int(E("LISTS_NEW_VAULTS", "5")))
+    n = lambda k, d: int(E(k, str(d)))
+    srv = make_server(E("LISTS_DB", "/data/lists.db"), E("LISTS_HOST", "0.0.0.0"), n("LISTS_PORT", 8787),
+                      n("LISTS_FAIL_MAX", 10), n("LISTS_NEW_VAULTS", 5), n("LISTS_VAULT_RPM", 60),
+                      n("LISTS_VAULT_MB", 50) << 20, n("LISTS_VAULT_ROWS", 100_000), n("LISTS_DB_MAX_MB", 500) << 20,
+                      E("LISTS_TRUSTED_PROXIES", ""))
     stop = threading.Event()
 
     def term(*_):

@@ -149,6 +149,18 @@ if (CASES.includes('hidden')) {
   C.ok(h === 1, 'visibilitychange:hidden flushes before a kill 60 ms later: 100% survive', `${Math.round(h * 100)}% (control without the event: ${Math.round(c * 100)}%)`);
 }
 if (CASES.includes('freeze')) {
+  // Headless Chromium keeps every page "visible", and Page.setWebLifecycleState('frozen') on a visible page does not
+  // dispatch `freeze` here. Probe first; if it doesn't fire, the case can't test the app and is reported N/A.
+  const probe = await prime(st.url);
+  await probe.page.evaluate(() => { window.__froze = 0; addEventListener('freeze', () => { window.__froze++; }); });
+  const pc = await probe.page.context().newCDPSession(probe.page);
+  await pc.send('Page.setWebLifecycleState', { state: 'frozen' }).catch(() => {});
+  await pc.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {});
+  const fired = await probe.page.evaluate(() => window.__froze);
+  await hardKill(probe.b); rmSync(probe.dir, { recursive: true, force: true });
+  if (!fired) { results.freeze = { untestable: true, note: 'freeze event not dispatched by CDP on a visible headless page' }; console.log('freeze: N/A — CDP frozen state does not dispatch `freeze` on a visible headless page'); }
+}
+if (CASES.includes('freeze') && !(results.freeze && results.freeze.untestable)) {
   const f = await hiddenCase('freeze');
   C.ok(f === 1, 'CDP Page.setWebLifecycleState frozen flushes before a kill 60 ms later', `${Math.round(f * 100)}%`);
 }
@@ -184,16 +196,19 @@ if (CASES.includes('draft')) {
     const { dir, b, page } = await prime(st.url);
     await page.keyboard.press('Escape');
     await page.keyboard.press('q');
-    await page.waitForSelector('.qa-in');
+    // The composer focuses its input 20 ms after opening (flows.mjs reports that race); wait for real focus.
+    await page.waitForFunction(() => document.activeElement && document.activeElement.matches('.qa-in'));
     await page.keyboard.type(`draft ${i} call ana fri`, { delay: 15 });
+    const typedVal = await page.evaluate(() => ({ input: document.querySelector('.qa-in')?.value, meta: window.__lists.DB.getMeta('draft'), pending: window.__lists.DB.pendingCount() }));
     await sleep(400);
     await hardKill(b);
     const d = await readBack(dir, st.url);
-    rs.push(d.draft === `draft ${i} call ana fri`);
+    rs.push({ ok: d.draft === `draft ${i} call ana fri`, got: d.draft, beforeKill: typedVal });
     rmSync(dir, { recursive: true, force: true });
   }
   results.draft = rs;
-  C.ok(rs.every(Boolean), 'quick-add draft survives a kill 400 ms after typing', `${rs.filter(Boolean).length}/${rs.length}`);
+  console.log('draft:', JSON.stringify(rs));
+  C.ok(rs.every((r) => r.ok), 'quick-add draft survives a kill 400 ms after typing', `${rs.filter((r) => r.ok).length}/${rs.length}`);
 }
 
 // 5. Two tabs of the same profile: tab A edits a title, tab B edits the same item's date; kill; both present.
@@ -230,7 +245,7 @@ if (CASES.includes('tabs')) {
   C.ok(rs.every((r) => r.title && r.when), 'two tabs editing different fields of one item: both edits survive a kill', rs.map((r) => `title:${r.title} when:${r.when}`).join(' | '));
 }
 
-writeFileSync(join(OUT, 'persist.json'), JSON.stringify({ when: new Date().toISOString(), runs: RUNS, results, checks: C.results }, null, 2));
+writeFileSync(join(OUT, process.env.CASES ? `persist-${process.env.CASES.replace(/,/g, '-')}.json` : 'persist.json'), JSON.stringify({ when: new Date().toISOString(), runs: RUNS, results, checks: C.results }, null, 2));
 const fails = C.summary();
 killAll();
 process.exit(fails ? 1 : 0);

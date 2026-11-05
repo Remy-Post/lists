@@ -66,7 +66,7 @@ export async function unseal(key, row) {
 
 export function createSync({
   db, onStatus = () => {}, base = '/api', nav = globalThis.navigator, now = Date.now,
-  fetch: f = (...a) => fetch(...a),
+  fetch: f = (...a) => fetch(...a), backupAgeMs = () => BACKUP_AGE, staleMs = () => null,
 }) {
   let st = {}, keys, keysFor, lastQ, lastEval = -1e9, timer = 0, fails = 0, backoff = 0, halted = 0;
   let chain = Promise.resolve(), held = 0;
@@ -131,7 +131,9 @@ export function createSync({
   // Backup-age rule: a backup older than 3 days relaxes "good" to online && !saveData && not 2g.
   const relaxed = (s = st) => {
     const c = conn();
-    return now() - (s.lastPush || 0) > BACKUP_AGE && online() && !(c && (c.saveData || /2g/.test(c.effectiveType)));
+    // Remy's rule: when the server copy hasn't been updated for N days and there is something to send,
+    // don't wait for Wi-Fi (any connection except 2G / Data Saver).
+    return now() - (s.lastPush || 0) > backupAgeMs() && online() && !(c && (c.saveData || /2g/.test(c.effectiveType)));
   };
 
   // Push the outbox and pull until caught up. Lock held, st loaded and paired. Throws on failure.
@@ -162,7 +164,7 @@ export function createSync({
         const left = out.length - push.length - big;
         st.cursor = res.cursor, st.mk = 0, more = res.more;
         if (!more) st.lastPull = now();
-        if (!left && !big) st.lastPush = now(), st.dirty = 0;
+        if (!left) st.lastPush = now(), st.dirty = big ? st.dirty : 0;
         await save();
         if (!more && !left && !res.rows.length) break;
       }
@@ -187,7 +189,9 @@ export function createSync({
     if (halted || t < backoff) return;
     const n = (await db.getOutbox()).length;
     if (!n != !st.dirty) st.dirty = n ? t : 0, await save();
-    if (!(n && t - st.dirty >= PUSH_STALE || t - (st.lastPull || 0) >= PULL_STALE)) return;
+    // Cadence: 'as you go' by default; a user-chosen interval (e.g. daily) replaces both thresholds.
+    const iv = staleMs();
+    if (!(n && t - st.dirty >= (iv ?? PUSH_STALE) || t - (st.lastPull || 0) >= (iv ?? PULL_STALE))) return;
     if (!relaxed()) {
       const q = await linkQuality();
       if (q != 'good') return status(q == 'poor' ? 'idle' : q, q == 'poor' ? 'Waiting for a good connection' : undefined);

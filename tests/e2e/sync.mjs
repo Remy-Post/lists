@@ -33,7 +33,8 @@ const snapshot = (d) => q(d, (S) => {
   walk(S.ROOT, 0);
   return { recs, tree };
 });
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const canon = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
+const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
 const focus = async (d, id) => { await d.page.keyboard.press('Escape'); await q(d, (S, O, A, DB, st, ui, x) => ui.focus(x), id); };
 
 const A = await device('A');
@@ -58,6 +59,8 @@ await C.step('pairing', async () => {
 });
 
 await C.step('edits on both devices converge', async () => {
+  // Edit on the Inbox outline page (tree moves are disabled in smart views like Today, by design).
+  for (const d of [A, B]) { await d.page.goto(st.url + '/#/inbox'); await ready(d.page); await d.page.waitForFunction(() => window.__lists.st.route.view === 'inbox'); }
   // A: new item via keyboard, and retitle the 2nd Inbox item.
   const [i0, i1, i2, i3] = await q(A, (S) => S.children(S.INBOX).slice(0, 4));
   await focus(A, i0); await A.page.keyboard.press('o'); await A.page.keyboard.type('from A', { delay: 5 }); await A.page.keyboard.press('Escape');
@@ -72,7 +75,7 @@ await C.step('edits on both devices converge', async () => {
   const s1 = await syncNow(A), s2 = await syncNow(B), s3 = await syncNow(A);
   const a = await snapshot(A), b = await snapshot(B);
   C.ok([s1, s2, s3].every((s) => s.state === 'idle'), 'syncNow A, B, A all succeed', [s1.state, s2.state, s3.state]);
-  C.ok(same(a.recs, b.recs) && same(a.tree, b.tree), 'A and B hold identical records and the same rendered tree', { a: a.tree.length, b: b.tree.length, diff: Object.keys(a.recs).filter((k) => !same(a.recs[k], b.recs[k])).slice(0, 5) });
+  C.ok(same(a.recs, b.recs) && same(a.tree, b.tree), 'A and B hold identical records and the same rendered tree', { a: a.tree.length, b: b.tree.length, diff: [...new Set([...Object.keys(a.recs), ...Object.keys(b.recs)])].filter((k) => !same(a.recs[k], b.recs[k])).slice(0, 5).map((k) => ({ k, a: a.recs[k], b: b.recs[k] })), treeDiff: a.tree.map((t, i) => t === b.tree[i] ? null : [i, t, b.tree[i]]).filter(Boolean).slice(0, 4) });
   const t1 = a.recs[i1] && a.recs[i1][0];
   C.ok(a.tree.some((t) => t.trim() === 'from A') && a.tree.some((t) => t.trim() === 'from B'), 'both new items are on both devices');
   C.ok(/\(B edit\)$/.test(t1) && !/\(A edit\)/.test(t1), 'concurrent title edits: the later write (B) wins on both devices', t1);
@@ -117,18 +120,49 @@ await C.step('concurrent moves that form a cycle converge acyclic', async () => 
   C.ok(a.live && b.live && a.visibleInP && b.visibleInP, 'neither X nor Y is lost (both still under P)', { a, b });
   const sa = await snapshot(A), sb = await snapshot(B);
   C.ok(same(sa.tree, sb.tree), 'rendered trees identical after the cycle repair', sa.tree.filter((t) => /X|Y|Cycle/.test(t)));
-  // A fresh boot (rebuild from IDB) must give the same answer as the live merge.
-  await A.page.reload(); await ready(A.page);
-  const a2 = await check(A);
-  C.ok(a2.pX === a.pX && a2.pY === a.pY, 'after a reload, A repairs the cycle the same way', { before: [a.pX, a.pY], after: [a2.pX, a2.pY] });
+  globalThis.__cycle = { ids, a };
 });
 
 await C.step('delete syncs', async () => {
   const x = await q(A, (S) => S.children(S.INBOX).find((id) => S.val(id, 'title') === 'from A'));
   await focus(A, x); await A.page.keyboard.press('Backspace');
-  await syncNow(A); await syncNow(B);
+  const onA = await q(A, (S, O, A, DB, st, ui, id) => ({ deleted: S.val(id, 'deleted'), route: st.route.view, cursor: st.cursor === id }), x);
+  const obA0 = await q(A, (S, O, A, DB) => DB.outboxSize());
+  const sA = await syncNow(A);
+  const obA1 = await q(A, (S, O, A, DB) => DB.outboxSize());
+  const sB = await syncNow(B);
   const onB = await q(B, (S, O, A, DB, st, ui, id) => ({ deleted: S.val(id, 'deleted'), inTrash: S.qTrash().includes(id) }), x);
-  C.ok(onB.deleted === 'trash' && onB.inTrash, 'an item deleted on A is in Trash on B', onB);
+  C.ok(onB.deleted === 'trash' && onB.inTrash, 'an item deleted on A is in Trash on B', { onA, onB });
+});
+
+await C.step('manual sync while offline reports failure', async () => {
+  await B.ctx.setOffline(true);
+  await q(B, (S, O, A, DB, st, ui) => O.tx('e', () => O.set(S.children(S.INBOX)[0], { title: 'offline edit' })));
+  await q(B, async (S, O, A, DB, st, ui) => { await ui.syncNow(); });
+  await sleep(100);
+  const toast = await B.page.evaluate(() => document.querySelector('.toast')?.textContent || '');
+  const label = await B.page.evaluate(() => document.querySelector('#sync .sl')?.textContent || '');
+  await B.ctx.setOffline(false);
+  C.ok(!/^Synced/.test(toast), '"Sync now" while offline does not claim "Synced"', { toast, label });
+});
+
+await C.step('after a reload', async () => {
+  const { ids, a } = globalThis.__cycle;
+  const reqs = [];
+  A.page.on('request', (r) => { if (r.url().includes('/api/sync')) reqs.push(r.url()); });
+  await A.page.reload(); await ready(A.page);
+  await sleep(3500); // past the 1.5 s boot gate
+  const s = await q(A, (S, O, A, DB, st, ui) => ui.syncState());
+  C.ok(s.state !== 'unpaired', 'a paired device still reports a paired sync state after a reload', s);
+  const n0 = reqs.length;
+  await A.page.keyboard.press('Escape');
+  await A.page.keyboard.press('Control+s');
+  await sleep(1500);
+  const modal = await A.page.evaluate(() => !!document.querySelector('.settings'));
+  C.ok(reqs.length > n0 && !modal, 'Ctrl+S (Sync now) after a reload syncs instead of opening Settings', { syncRequests: reqs.length - n0, settingsOpened: modal });
+  await A.page.keyboard.press('Escape');
+  const check = await q(A, (S, O, A, DB, st, ui, x) => [S.parentOf(x.X), S.parentOf(x.Y)], ids);
+  C.ok(check[0] === a.pX && check[1] === a.pY, 'after a reload (rebuild from IDB), A repairs the cycle the same way', { before: [a.pX, a.pY], after: check });
 });
 
 C.ok(A.errs.length + B.errs.length === 0, 'no page errors on either device', [...A.errs, ...B.errs].slice(0, 4));

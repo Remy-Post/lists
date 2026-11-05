@@ -39,8 +39,9 @@ ui.settings = async () => {
       code
         ? h('div', { class: 'sblock' },
           h('p', null, `Encrypted backup is on. Last backed up ${age}.`, ss && ss.message ? h('span', { class: 'muted' }, ' ' + ss.message) : null),
-          h('div', { class: 'srow' }, h('span', { class: 'k' }, 'Back up at least every'), seg('Backup interval', days, [[1, '1 day'], [3, '3 days'], [7, '7 days']], (v) => DB.setMeta('backupDays', v))),
-          h('p', { class: 'muted' }, 'Lists syncs only on Wi-Fi or a fast connection, and only when the backup is stale. If a change has waited longer than this, it syncs on any connection except 2G or Data Saver.'),
+          h('div', { class: 'srow' }, h('span', { class: 'k' }, 'Sync on Wi-Fi'), seg('Sync cadence', DB.getMeta('syncEvery') || 0, [[0, 'As you go'], [1, 'Daily'], [3, 'Every 3 days'], [7, 'Weekly']], (v) => DB.setMeta('syncEvery', v || null))),
+          h('div', { class: 'srow' }, h('span', { class: 'k' }, 'On mobile data after'), seg('Backup age', days, [[1, '1 day'], [3, '3 days'], [7, '7 days']], (v) => DB.setMeta('backupDays', v))),
+          h('p', { class: 'muted' }, 'Lists stays on this device and syncs only on Wi-Fi or a fast connection, on the cadence above. If the server copy is older than the second setting and you have unsent changes, it syncs on any connection except 2G or Data Saver.'),
           h('div', { class: 'acts' },
             h('button', { class: 'btn', onclick: () => ui.syncNow() }, 'Sync now'),
             h('button', { class: 'btn', onclick: () => showCode(code) }, 'Pair another device'),
@@ -57,7 +58,9 @@ ui.settings = async () => {
       h('div', { class: 'acts' },
         h('button', { class: 'btn', onclick: () => ui.exportMd() }, 'Export Markdown'),
         h('button', { class: 'btn', onclick: () => ui.exportJson() }, 'Export backup (JSON)'),
-        h('button', { class: 'btn', onclick: () => ui.importFile() }, 'Import…')),
+        h('button', { class: 'btn', onclick: () => ui.importFile() }, 'Import…'),
+        h('button', { class: 'btn', onclick: () => ui.importFile('restore') }, 'Restore from backup…')),
+      ui.install ? h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => { ui.install(); draw(); } }, 'Install Lists as an app')) : null,
       h('h3', null, 'Help'),
       h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { close(entry); ui.cheat(); } }, 'Keyboard shortcuts'), h('button', { class: 'btn', onclick: () => { close(entry); ui.tutorial && ui.tutorial(); } }, 'Add the tour to Today')),
       h('p', { class: 'muted small' }, `Lists ${window.LISTS_VERSION || ''} · ${S.recs.size} records · open source`),
@@ -103,7 +106,7 @@ function download(name, text, type) {
 }
 ui.exportMd = () => { download(`lists-${A.today()}.md`, A.toMarkdown(), 'text/markdown'); ui.toast('Exported Markdown'); };
 ui.exportJson = () => { download(`lists-backup-${A.today()}.json`, JSON.stringify({ app: 'lists', v: 1, records: S.allRecords() }), 'application/json'); ui.toast('Exported backup'); };
-ui.importFile = () => {
+ui.importFile = (mode = 'merge') => {
   const inp = h('input', { type: 'file', accept: '.json,.md,.txt,text/plain,application/json' });
   inp.addEventListener('change', async () => {
     const f = inp.files[0]; if (!f) return;
@@ -113,15 +116,20 @@ ui.importFile = () => {
         const j = JSON.parse(text);
         if (!j || !Array.isArray(j.records)) throw new Error('bad');
         const recs = j.records.filter(validRecord);
-        const n = S.mergeRemote(recs);
-        for (const r of recs) if (S.recs.has(r.id)) DB.put(S.recs.get(r.id), true);
-        if (recs.length < j.records.length) ui.toast(`Skipped ${j.records.length - recs.length} invalid records`);
-        ui.toast(`Merged ${n} records`);
+        if (mode === 'restore') {
+          // Restore: re-write every field with a fresh stamp so the backup wins over newer edits and
+          // deletions. One undo step; it syncs like any edit (req-trust-touch-19).
+          ui.restoreRecords(recs);
+          ui.toast(`Restored ${recs.length} records`, { undo: true });
+        } else {
+          const n = S.mergeRemote(recs);
+          for (const r of recs) if (S.recs.has(r.id)) DB.put(S.recs.get(r.id), true);
+          ui.toast(recs.length < j.records.length ? `Merged ${n} records, skipped ${j.records.length - recs.length} invalid` : `Merged ${n} records`);
+        }
       } else {
-        const l = A.newList(f.name.replace(/\.\w+$/, ''));
-        A.pasteOutline(text.replace(/^#.*$/gm, ''), l, 0);
-        ui.go({ view: 'node', id: l }, 'key');
-        ui.toast('Imported as a new list', { undo: true });
+        const lists = A.importMarkdown(text, f.name.replace(/\.\w+$/, ''));
+        if (lists[0]) ui.go({ view: 'node', id: lists[0] }, 'key');
+        ui.toast(lists.length === 1 ? 'Imported 1 list' : `Imported ${lists.length} lists`, { undo: true });
       }
       renderPage(); renderSide();
     } catch { ui.toast('Couldn’t read that file'); }

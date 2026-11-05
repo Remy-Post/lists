@@ -9,7 +9,6 @@ import { wire, focusRow } from './input.js';
 import { wireKeys } from './keys.js';
 import { wireGestures } from './gesture.js';
 import { ui } from './ui.js';
-import { createSync } from './sync.js';
 
 const VERSION = typeof LISTS_BUILD === 'string' ? LISTS_BUILD : 'dev';
 window.LISTS_VERSION = VERSION;
@@ -67,6 +66,12 @@ function parseHash() {
   if (VIEWS.includes(a)) return { view: a };
   return { view: DB.getMeta('lastView') || 'today' };
 }
+function announce(r) {
+  const live = $('#live');
+  if (!live) return;
+  const name = r.view === 'node' ? S.val(r.id, 'title') || 'Untitled' : { inbox: 'Inbox', today: 'Today', upcoming: 'Upcoming', someday: 'Someday', logbook: 'Logbook', trash: 'Trash' }[r.view];
+  live.textContent = `${name}, ${st.rows.length} ${st.rows.length === 1 ? 'item' : 'items'}`;
+}
 const hashOf = (r) => '#/' + (r.view === 'node' ? 'n/' + r.id : r.view);
 function show(r, kind, fromRow) {
   const prev = st.route;
@@ -78,17 +83,25 @@ function show(r, kind, fromRow) {
   const shallower = prev.view === 'node' && (r.view !== 'node' || S.ancestors(prev.id).includes(r.id));
   const doRender = () => { renderPage(); renderSide(); };
   if (same) { doRender(); return; }
+  // Move focus to the page (not a row) so keyboard users land in the new context (a11y-09).
+  queueMicrotask(() => { const m = $('#main'); if (!st.touch && m && (document.activeElement === document.body || !document.activeElement || !document.activeElement.isConnected)) m.focus({ preventScroll: true }); announce(r); });
   if (r.view !== 'today' && light) { light.destroy(); light = null; }
-  // Zoom: the row's title becomes the page title (a shared-element View Transition).
-  const t = fromRow && fromRow.querySelector('.tx');
-  if (t && kind === 'pointer') t.style.viewTransitionName = 'ztitle';
-  document.documentElement.dataset.dir = deeper ? 'in' : shallower ? 'out' : 'x';
+  // Zoom: the new sheet opens out of the clicked row, and that row's title becomes the page title.
+  // Exactly one element carries 'ztitle' in each state (visual audit S2-1).
+  const t = fromRow && kind === 'pointer' ? fromRow.querySelector('.tx') : null;
+  const root = document.documentElement;
+  if (fromRow) { const b = fromRow.getBoundingClientRect(); root.style.setProperty('--vt-y', Math.max(0, b.top) + 'px'); root.style.setProperty('--vt-h', b.height + 'px'); }
+  else { root.style.removeProperty('--vt-y'); root.style.removeProperty('--vt-h'); }
+  const pt = $('#ptitle');
+  pt.style.viewTransitionName = '';
+  if (t) t.style.viewTransitionName = 'ztitle';
+  root.dataset.dir = deeper ? 'in' : shallower ? 'out' : 'x';
   transition(() => {
     if (t) t.style.viewTransitionName = '';
-    if (t || deeper) $('#ptitle').style.viewTransitionName = 'ztitle';
+    if (t) pt.style.viewTransitionName = 'ztitle';
     doRender();
   }, kind === 'key' ? 'key' : 'nav');
-  setTimeout(() => { $('#ptitle').style.viewTransitionName = ''; }, 600);
+  setTimeout(() => { pt.style.viewTransitionName = ''; }, 700);
   scrollTo({ top: 0 });
   if (st.touch) closeDrawer();
 }
@@ -102,8 +115,12 @@ addEventListener('popstate', () => { const r = parseHash(); if (r.view) show(r, 
 addEventListener('hashchange', () => { const r = parseHash(); if (r.pair) return pairFromLink(r.pair); if (r.view) show(r, 'pointer'); });
 
 /* ---------------- sync ---------------- */
-let sync = null, syncStatus = { state: 'unpaired' };
-function setupSync() {
+// The sync module loads only on devices that use backup (it isn't on the critical path).
+let sync = null, syncStatus = { state: 'unpaired' }, syncLoading = null;
+const syncMeta = () => DB.getMeta('sync.sync') || {};
+const isPaired = () => !!syncMeta().key;
+const loadSync = () => (syncLoading ||= import('./sync.js').then((m) => { setupSync(m.createSync); return sync; }));
+function setupSync(createSync) {
   sync = createSync({
     db: {
       getOutbox: () => DB.getOutbox((id) => S.recs.get(id)),
@@ -114,33 +131,43 @@ function setupSync() {
       requeueAll: () => requeueAll(),
     },
     onStatus: (s) => { syncStatus = s; paintSync(); },
+    backupAgeMs: () => (DB.getMeta('backupDays') ?? 3) * 864e5,
+    staleMs: () => { const d = DB.getMeta('syncEvery'); return d ? d * 864e5 : null; },
   });
+  // Paired devices must not read "On this device" until the first sync runs (req-trust-touch-02).
+  sync.pairingCode().then((c) => {
+    if (c && syncStatus.state === 'unpaired') { const m = syncMeta(); syncStatus = { state: 'idle', lastPush: m.lastPush, lastPull: m.lastPull }; paintSync(); }
+  }).catch(() => {});
 }
 function paintSync() {
   const el = $('#sync');
   if (!el) return;
   const s = syncStatus;
   el.dataset.state = s.state;
-  const label = { idle: 'Backed up', syncing: 'Syncing', offline: 'Offline', error: 'Backup paused', unpaired: 'On this device' }[s.state] || '';
+  let label = { idle: 'Backed up', syncing: 'Syncing', offline: 'Offline', error: 'Backup paused', unpaired: 'On this device' }[s.state] || '';
+  if (s.state === 'idle' && s.message) label = /good connection/.test(s.message) ? 'Waiting for Wi-Fi' : 'Backed up*';
+  if (s.state === 'idle' && !s.lastPush) label = 'Not backed up yet';
   el.querySelector('.sl').textContent = label;
   el.title = s.lastPush ? 'Last backup ' + new Date(s.lastPush).toLocaleString() : s.message || label;
 }
 ui.syncState = () => syncStatus;
 ui.syncNow = async () => {
-  if (!sync || syncStatus.state === 'unpaired') { ui.settings(); return; }
+  if (!isPaired()) { ui.settings(); return; }
+  await loadSync();
   ui.toast('Syncing…', { ms: 1200 });
   const ok = await sync.syncNow().catch(() => false);
   ui.toast(ok ? 'Synced' : navigator.onLine ? 'Sync failed. It will retry on a good connection.' : 'You’re offline. Changes are saved here and will sync later.');
 };
 const requeueAll = () => DB.requeueAll([...S.recs.keys()].filter((id) => id !== S.ROOT));
-ui.createVault = async () => { await requeueAll(); const c = await sync.createVault(); await sync.syncNow().catch(() => {}); return c; };
+ui.createVault = async () => { await loadSync(); await requeueAll(); const c = await sync.createVault(); await sync.syncNow().catch(() => {}); return c; };
 ui.join = async (code) => {
+  await loadSync();
   dropUntouchedTour();
   await requeueAll();
   await sync.join(code.trim());
   await sync.syncNow();
 };
-ui.unpair = async () => { await sync.unpair(); await requeueAll(); };
+ui.unpair = async () => { await loadSync(); await sync.unpair(); await requeueAll(); };
 /** A device being paired shouldn't push its untouched tour into the account (audit S2-9). */
 function dropUntouchedTour() {
   const tour = new Set(DB.getMeta('tourIds') || []);
@@ -149,12 +176,15 @@ function dropUntouchedTour() {
   if (others.length) return;
   for (const id of tour) if (S.recs.has(id)) S.patch(id, { deleted: 'void' });
 }
-ui.pairingCode = () => (sync ? sync.pairingCode() : null);
+ui.pairingCode = async () => (isPaired() ? (await loadSync()).pairingCode() : null);
 async function pairFromLink(code) {
   history.replaceState(null, '', '#/today'); // the key must not linger in history
   try { sessionStorage.setItem('lists.pair', code); } catch {} // survives a reload until join resolves
   show({ view: 'today' }, 'key');
   if (await ui.pairingCode()) { ui.toast('This device is already paired'); clearPending(); return; }
+  // Never auto-join: a link could come from someone else, and joining uploads this device's lists (security-1).
+  const ok = await ui.confirmPair(code);
+  if (!ok) { clearPending(); return; }
   try { await ui.join(code); ui.toast('Paired. Your lists are syncing.'); } catch { ui.toast('That pairing link didn’t work'); }
   clearPending();
 }
@@ -163,14 +193,17 @@ const pendingPair = () => { try { return sessionStorage.getItem('lists.pair'); }
 const maybeSync = (why) => { try { sync && sync.maybeSync(why); } catch {} };
 
 /* ---------------- the moment: Today, struck through ---------------- */
-let wasOpen = null;
+let wasOpen = null, forcedClear = false;
 function todayOpen() { const t = S.qToday(A.today()); return t.day.length + t.eve.length; }
 function checkCleared(force) {
-  if (st.route.view !== 'today') { wasOpen = null; document.body.classList.remove('cleared'); return; }
+  if (st.route.view !== 'today') { wasOpen = null; forcedClear = false; document.body.classList.remove('cleared'); return; }
+  if (force) forcedClear = true; // #/debug/clear stays cleared until you navigate away
   const open = todayOpen();
   const doneN = $('#outline').querySelectorAll('.row.done').length;
-  const cleared = (open === 0 && doneN > 0) || force;
+  const cleared = (open === 0 && doneN > 0) || forcedClear;
   document.body.classList.toggle('cleared', !!cleared);
+  if (cleared) { const c = $('#empty .cnt'); if (c) c.textContent = `${doneN} done`; }
+  if (cleared && st.touch) $('#empty').scrollIntoView({ block: 'nearest' });
   if (cleared && (wasOpen > 0 || force)) celebrate(force);
   wasOpen = open;
 }
@@ -198,7 +231,7 @@ function tutorial() {
   const touch = st.touch;
   const lines = touch ? [
     ['Swipe this row right to complete it', []],
-    ['Tap ＋ to add an item. Type “tomorrow” or “every monday” and it becomes a date', []],
+    ['Tap + to add an item. Type “tomorrow” or “every monday” and it becomes a date', []],
     ['Lists nest as deep as you like', ['Long-press and drag a row sideways to nest it', ['Like this']]],
     ['Swipe left to schedule. Tap a row for its details', []],
     ['Complete them all and see what Today looks like when it’s clear', []],
@@ -231,8 +264,12 @@ function tutorial() {
 ui.tutorial = tutorial;
 
 /* ---------------- drawer (phone) ---------------- */
-function openDrawer() { document.body.classList.add('drawer'); $('#side').setAttribute('aria-hidden', 'false'); }
-function closeDrawer() { document.body.classList.remove('drawer'); }
+// The off-canvas drawer must leave the tab order and accessibility tree when closed (a11y-05).
+const phoneMQ = matchMedia('(max-width: 599.98px)');
+function syncDrawer() { const open = document.body.classList.contains('drawer'); $('#side').inert = phoneMQ.matches && !open; $('#menuBtn').setAttribute('aria-expanded', String(open)); }
+function openDrawer() { document.body.classList.add('drawer'); syncDrawer(); const f = $('#side .nv'); f && f.focus({ preventScroll: true }); }
+function closeDrawer() { const was = document.body.classList.contains('drawer'); document.body.classList.remove('drawer'); syncDrawer(); if (was && phoneMQ.matches && $('#side').contains(document.activeElement)) $('#menuBtn').focus({ preventScroll: true }); }
+phoneMQ.addEventListener?.('change', syncDrawer);
 
 /* ---------------- chrome wiring ---------------- */
 function wireChrome() {
@@ -249,7 +286,7 @@ function wireChrome() {
   $('#moreBtn').addEventListener('click', () => ui.palette('all'));
   // Page title & notes editing (node pages).
   const title = $('#ptitle'), notes = $('#pnotes');
-  title.addEventListener('input', () => { if (st.route.view !== 'node') return; O.tx('Rename', () => O.set(st.route.id, { title: title.textContent.replace(/\n/g, ' ') }), { merge: 'pt:' + st.route.id }); });
+  title.addEventListener('input', () => { if (st.route.view !== 'node') return; O.tx('Rename', () => O.set(st.route.id, { title: title.textContent.replace(/\n/g, ' ') }), { merge: 'pt:' + st.route.id, ctx: { route: { ...st.route }, sel: null } }); });
   title.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -258,7 +295,24 @@ function wireChrome() {
       else { const id = A.createAt(st.route.id, 0); st.fresh.add(id); renderPage(); focusRow(id, { edit: true }); }
     }
   });
-  notes.addEventListener('input', () => { if (st.route.view !== 'node') return; O.tx('Notes', () => O.set(st.route.id, { notes: notes.innerText }), { merge: 'pn:' + st.route.id }); });
+  notes.addEventListener('input', () => { if (st.route.view !== 'node') return; O.tx('Notes', () => O.set(st.route.id, { notes: notes.innerText }), { merge: 'pn:' + st.route.id, ctx: { route: { ...st.route }, sel: null } }); });
+  // Paste an outline anywhere that isn't a text field: after the selected row, or at the page's default spot (req-outline-04).
+  document.addEventListener('paste', (e) => {
+    const t = e.target;
+    if (ui.modalOpen() || (t && (t.isContentEditable || /^(INPUT|TEXTAREA)$/.test(t.tagName)))) return;
+    if (st.route.view === 'trash' || st.route.view === 'logbook') return;
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (!text || !text.trim()) return;
+    e.preventDefault();
+    let parent, index;
+    const smart = st.route.view !== 'node' && st.route.view !== 'inbox';
+    const top = smart ? { ...(A.defaultTarget().fields || {}) } : {};
+    if (st.cursor && S.recs.has(st.cursor)) { parent = S.parentOf(st.cursor); index = S.children(parent).indexOf(st.cursor) + 1; }
+    else { const d = A.defaultTarget(); parent = d.parent; index = d.index; }
+    const ids = A.pasteOutline(text, parent, index, top);
+    renderPage({ flip: true }); renderSide();
+    if (ids.length) { focusRow(ids[ids.length - 1]); ui.toast(ids.length === 1 ? 'Pasted 1 item' : `Pasted ${ids.length} items`, { undo: true }); }
+  });
   // Click on the empty area below the list starts a new item at the end (Workflowy-like).
   $('#tail').addEventListener('click', () => {
     if (st.route.view === 'trash' || st.route.view === 'logbook' || st.route.view === 'upcoming') return;
@@ -274,7 +328,9 @@ function wireChrome() {
     A.restore([row.dataset.id]); renderPage({ flip: true }); renderSide(); ui.toast('Restored', { undo: true });
   });
   // Install prompt (Android Chrome)
-  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); ui.install = () => e.prompt(); });
+  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); ui.install = () => { e.prompt(); ui.install = null; }; });
+  addEventListener('appinstalled', () => { ui.install = null; DB.askPersist(); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (!localStorage.getItem('lists.theme')) ui.setTheme('system'); });
 }
 
 /* ---------------- lifecycle ---------------- */
@@ -349,8 +405,9 @@ async function boot() {
   st.collapsed = new Set(DB.getMeta('collapsed') || []);
   const first = !S.recs.has(S.INBOX);
   if (first) S.patch(S.INBOX, { kind: 'inbox', title: 'Inbox', pos: { parent: S.ROOT, key: 'a0', prev: null } });
-  setupSync();
+  if (isPaired()) { syncStatus = { state: 'idle', lastPush: syncMeta().lastPush, lastPull: syncMeta().lastPull }; loadSync(); }
   wire(); wireKeys(); wireGestures(); wireChrome(); wireLifecycle();
+  A.onCollapsedChange(() => ui.saveCollapsed());
   const r = parseHash();
   const pair = r.pair || pendingPair();
   if (pair) { show({ view: 'today' }, 'key'); pairFromLink(pair); }
@@ -358,6 +415,7 @@ async function boot() {
   if (r.debug === 'clear') setTimeout(() => checkCleared(true), 300);
   if (first && !pair && !storageBroken && !DB.getMeta('toured')) { DB.setMeta('toured', 1); tutorial(); }
   watchStorage();
+  syncDrawer();
   const theme = (() => { try { return localStorage.getItem('lists.theme'); } catch { return null; } })();
   ui.setTheme(theme || 'system');
   document.body.classList.add('ready');

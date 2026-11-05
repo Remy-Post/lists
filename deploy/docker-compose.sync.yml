@@ -19,6 +19,16 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     stop_grace_period: 10s
+    environment:
+      # X-Real-IP is believed only from these peers. n8n_default (172.18.0.0/16) also hosts other
+      # apps, so trust the Caddy container by name (re-resolved every 60 s, so a new IP is followed)
+      # rather than the whole subnet. Caddy was 172.18.0.3 on 2026-11-05.
+      LISTS_TRUSTED_PROXIES: n8n-caddy-1
+      # Defaults, listed so they are easy to find: per-vault quota and request rate, disk guard.
+      LISTS_VAULT_MB: "50"
+      LISTS_VAULT_ROWS: "100000"
+      LISTS_VAULT_RPM: "60"
+      LISTS_DB_MAX_MB: "500"
     volumes:
       - lists_sync_data:/data
     networks:

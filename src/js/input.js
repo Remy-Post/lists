@@ -131,7 +131,12 @@ function backspaceAtStart(id, tx) {
     if (prev) focusRow(prev, { edit: true, caret: 'end' }); else focusRow(st.rows[0], { edit: true, caret: 0 });
     return true;
   }
-  if (!prev || S.hasChildren(id) || S.val(prev, 'kind') !== 'item' || hasContent(id)) return false;
+  // Join only in outlines, and only with the row right above in the tree (req-outline-05).
+  const outline = st.route.view === 'node' || st.route.view === 'inbox';
+  // Tree-adjacent: the row above is the parent, the previous sibling, or the last visible descendant of it.
+  const sib = S.children(S.parentOf(id)), before = sib[sib.indexOf(id) - 1];
+  const adj = !!prev && (prev === S.parentOf(id) || prev === before || (!!before && S.ancestors(prev).includes(before)));
+  if (!outline || !adj || !prev || S.hasChildren(id) || S.val(prev, 'kind') !== 'item' || hasContent(id)) return false;
   const pt = S.val(prev, 'title');
   O.tx('Join', () => { O.set(prev, { title: pt + text }); O.set(id, { deleted: 'void' }); }, { ctx: { route: { ...st.route }, sel: prev } });
   renderPage({ flip: true });
@@ -281,6 +286,7 @@ export function wire() {
     if (row._swiped) { row._swiped = false; return; }
     if (e.target.closest('.ck')) {
       e.preventDefault();
+      st.keyAt = 0;
       if (st.route.view === 'trash' || S.val(id, 'kind') === 'log') return; // repeat logs are a record, not a task
       haptic(8);
       A.toggleDone(st.sel.has(id) && st.sel.size > 1 ? [...st.sel] : [id]);

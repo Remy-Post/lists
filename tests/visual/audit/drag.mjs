@@ -1,0 +1,30 @@
+// drag.mjs — desktop drag-in-progress captures (reorder/re-nest and drop on a sidebar list).
+import { launch, openSeeded, go, fx, shot } from './lib.mjs';
+const scheme = process.argv[2] || 'light';
+const b = await launch();
+const { page } = await openSeeded(b, 'desk', scheme);
+const F = await fx(page);
+await go(page, '#/n/' + F.home);
+const row = page.locator('#outline .row', { hasText: 'Choose backsplash tile' });
+const bb = await row.boundingBox();
+const tl = await row.locator('.tx').boundingBox();
+// Grab the row on the empty area to the right of the title text (the .tx span is flex:1, so use the meta line gutter).
+const x = bb.x + bb.width - 60, y = bb.y + bb.height - 6;
+const tgt = await page.evaluate(([x, y]) => { const e = document.elementFromPoint(x, y); return e.className + ' / ' + e.tagName; }, [x, y]);
+console.log('grab target', tgt, 'tx right', tl.x + tl.width, 'row right', bb.x + bb.width);
+await page.mouse.move(x, y); await page.mouse.down();
+await page.mouse.move(x - 10, y - 10, { steps: 3 });
+await page.mouse.move(x - 40, y - 200, { steps: 10 });
+await page.waitForTimeout(150);
+console.log(await page.evaluate(() => ({ dragging: document.body.classList.contains('dragging'), ghost: !!document.querySelector('.drag-ghost'), line: !!document.querySelector('.drop-line:not([hidden])') })));
+await shot(page, `desk-${scheme}-drag`);
+await page.mouse.move(x + 30, y - 200, { steps: 6 });
+await page.waitForTimeout(120);
+await shot(page, `desk-${scheme}-drag-nest`);
+const li = await page.locator('.side-lists .li').nth(2).boundingBox();
+await page.mouse.move(li.x + 60, li.y + li.height / 2, { steps: 10 });
+await page.waitForTimeout(150);
+await shot(page, `desk-${scheme}-drag-sidebar`);
+await page.mouse.move(x, y, { steps: 10 });
+await page.mouse.up();
+await b.close();

@@ -42,7 +42,7 @@ for (const f of ['app.css', 'phone.css', 'desk.css']) {
 // JS. The lazy modules (gl, panels) import nothing, so they are built standalone and hashed first;
 // the app bundle then refers to them as external files. Result: one app file with no static chunks.
 const lazyNames = {};
-for (const m of ['gl', 'panels']) {
+for (const m of ['gl', 'panels', 'sync']) {
   const r = await build({ entryPoints: [join(SRC, 'js', m + '.js')], bundle: true, format: 'esm', minify: true, write: false,
     target: ['chrome111', 'safari16.4', 'firefox115'], legalComments: 'none' });
   const out = r.outputFiles[0].contents;
@@ -50,7 +50,7 @@ for (const m of ['gl', 'panels']) {
   writeFileSync(join(A, n), out);
   lazyNames[m] = n;
 }
-const lazyPlugin = { name: 'lazy', setup(b) { b.onResolve({ filter: /^\.\/(gl|panels)\.js$/ }, (a) => ({ path: './' + lazyNames[a.path.slice(2, -3)], external: true })); } };
+const lazyPlugin = { name: 'lazy', setup(b) { b.onResolve({ filter: /^\.\/(gl|panels|sync)\.js$/ }, (a) => ({ path: './' + lazyNames[a.path.slice(2, -3)], external: true })); } };
 const js = await build({
   entryPoints: [join(SRC, 'js', 'main.js')], bundle: true, splitting: false, format: 'esm', minify: true,
   target: ['chrome111', 'safari16.4', 'firefox115'], write: false, plugins: [lazyPlugin],

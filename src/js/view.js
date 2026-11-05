@@ -54,9 +54,28 @@ function groupsFor(view) {
     return g;
   }
   if (view === 'upcoming') {
-    return S.qUpcoming(t).map(([d, ids]) => ({ key: d, label: dayLabel(d), date: d, rows: ids }));
+    // Things' rhythm: the next 7 days one by one, then the rest of this month, then whole months.
+    const doneToday = S.qDoneToday(todayStart()).filter((id) => { const w = S.val(id, 'when'), dl = S.val(id, 'deadline'); return (w && w > t) || (dl && dl > t); });
+    const byDate = new Map(S.qUpcoming(t));
+    for (const id of doneToday) { const d = [S.val(id, 'when'), S.val(id, 'deadline')].filter((x) => x && x > t).sort()[0]; if (!byDate.has(d)) byDate.set(d, []); byDate.get(d).push(id); }
+    const dates = [...byDate.keys()].sort();
+    const week = addDaysYMD(t, 7), now = fromYMD(t);
+    const groups = new Map();
+    for (const d of dates) {
+      const dt = fromYMD(d);
+      let key, label;
+      if (d <= week) { key = d; label = dayLabel(d); }
+      else if (dt.getFullYear() === now.getFullYear() && dt.getMonth() === now.getMonth()) { key = 'rest'; label = 'Rest of ' + dt.toLocaleDateString(undefined, { month: 'long' }); }
+      else { key = 'm' + d.slice(0, 7); label = dt.toLocaleDateString(undefined, dt.getFullYear() === now.getFullYear() ? { month: 'long' } : { month: 'long', year: 'numeric' }); }
+      if (!groups.has(key)) groups.set(key, { key, label, date: d <= week ? d : null, rows: [] });
+      groups.get(key).rows.push(...byDate.get(d));
+    }
+    return [...groups.values()];
   }
-  if (view === 'someday') return [{ key: 'sd', rows: S.qSomeday() }];
+  if (view === 'someday') {
+    const done = S.qDoneToday(todayStart()).filter((id) => S.val(id, 'someday') && !S.val(id, 'when'));
+    return [{ key: 'sd', rows: [...S.qSomeday(), ...done] }];
+  }
   if (view === 'logbook') {
     const m = new Map();
     for (const id of S.qLogbook()) {
@@ -70,14 +89,15 @@ function groupsFor(view) {
   if (view === 'trash') return [{ key: 'tr', rows: S.qTrash() }];
   return [];
 }
+const addDaysYMD = (d, n) => { const x = fromYMD(d); x.setDate(x.getDate() + n); return ymdOf(x); };
 const ymdOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function dayLabel(d) {
   const f = formatDay(d, new Date());
   const dt = fromYMD(d);
   const n = dt.getDate();
   const diff = Math.round((dt - fromYMD(today())) / 864e5);
-  if (diff <= 6) return { big: String(n), small: f };
-  return { big: String(n), small: dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short' }) };
+  if (diff <= 1) return { big: String(n), small: f };
+  return { big: String(n), small: dt.toLocaleDateString(undefined, { weekday: 'long' }) };
 }
 
 /* ---------------- rows ---------------- */
@@ -118,17 +138,21 @@ export function fillRow(el, id, m, smart) {
   el.tabIndex = st.cursor === id ? 0 : -1;
   const ck = el.children[1];
   ck.setAttribute('aria-checked', String(!!done));
+  el.setAttribute('aria-checked', String(!!done));
+  const trash = st.route.view === 'trash';
+  if (trash) { ck.removeAttribute('role'); ck.removeAttribute('aria-checked'); }
+  else ck.setAttribute('role', 'checkbox');
+  ck.setAttribute('aria-label', (trash ? 'Restore ' : done ? 'Reopen ' : 'Complete ') + '“' + (S.val(id, 'title') || 'Untitled') + '”');
   // title (never clobber the text being edited)
   const title = S.val(id, 'title');
   if (document.activeElement !== el._tx && el._tx.textContent !== title) el._tx.textContent = title;
   el._tx.dataset.ph = heading ? 'Heading' : 'New item';
-  // path (smart views)
-  const pa = el.querySelector('.pa');
+  // Where it lives (smart views): a quiet chip at the end of the meta line, so the checkbox stays on the title.
+  let where = '';
   if (smart) {
-    // Items straight in the Inbox need no path; nested items show where they live.
     const anc = S.ancestors(id).filter((a, i, arr) => !(a === S.INBOX && arr.length === 1)).map((a) => (a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled'));
-    pa.textContent = anc.join('  ›  ');
-  } else pa.textContent = '';
+    if (anc.length) where = anc.length > 2 ? anc[0] + ' › … › ' + anc[anc.length - 1] : anc.join(' › ');
+  }
   // notes preview
   const notes = S.val(id, 'notes');
   el.querySelector('.nt').textContent = notes ? notes.split('\n')[0] : '';
@@ -137,7 +161,8 @@ export function fillRow(el, id, m, smart) {
   const bits = [];
   const w = S.val(id, 'when'), dl = S.val(id, 'deadline');
   const inToday = st.route.view === 'today';
-  if (w && !(inToday && w === t)) {
+  const inUpcomingDay = st.route.view === 'upcoming' && w && w > t && w <= addDaysYMD(t, 7);
+  if (w && !(inToday && w === t) && !inUpcomingDay) {
     if (w < t && !done) bits.push(`<span class="chip since">${inToday ? 'since ' : ''}${formatDay(w, new Date())}</span>`);
     else if (!(inToday)) bits.push(`<span class="chip when">${formatDay(w, new Date())}${S.val(id, 'evening') ? ' ' + ICON.moon : ''}</span>`);
   } else if (w && S.val(id, 'evening') && !inToday) bits.push(`<span class="chip when">This evening</span>`);
@@ -146,9 +171,12 @@ export function fillRow(el, id, m, smart) {
     const late = dl < t && !done, due = dl === t;
     bits.push(`<span class="chip dl${late ? ' late' : ''}${due ? ' due' : ''}">${ICON.flag}${due ? 'Due today' : formatDay(dl, new Date())}</span>`);
   }
-  if (S.val(id, 'rrule')) bits.push(`<span class="chip rep" title="${esc(safeDescribe(S.val(id, 'rrule')))}">${ICON.rep}</span>`);
+  if (S.val(id, 'rrule')) bits.push(`<span class="chip rep" title="${esc(safeDescribe(S.val(id, 'rrule')))}">${ICON.rep}<span class="vh">${esc(safeDescribe(S.val(id, 'rrule')))}</span></span>`);
+  if (inToday && S.val(id, 'evening')) bits.push('<span class="vh">This evening</span>');
+  if (st.route.view === 'logbook' && S.val(id, 'doneAt')) bits.push(`<span class="chip at">${new Date(S.val(id, 'doneAt')).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>`);
   const tags = S.val(id, 'tags');
   if (tags && tags.length) bits.push(...tags.map((g) => `<span class="chip tag">${esc(g)}</span>`));
+  if (where) bits.push(`<span class="chip where">${esc(where)}</span>`);
   const pr = S.val(id, 'priority');
   el.dataset.pri = pr || '';
   const mtHtml = bits.join('');
@@ -181,8 +209,15 @@ function flushStrikes() {
     const tl = el.querySelector('.tl');
     if (el._strikeQ === 'anim') {
       el._strikeQ = null;
-      // Let the title condense first, then measure and draw (docs/PLAN.md §11.4).
-      setTimeout(() => { el._sw = w; drawStrike(tl, el._tx, id, st.reduced ? false : 'full'); }, st.reduced ? 0 : 190);
+      // The pencil leads: measure the condensed title at once, draw the strike from t=0, and let the
+      // type settle under it (visual audit S2-2). Keyboard completion draws in 90 ms.
+      const tx = el._tx;
+      tx.style.transition = 'none';
+      el._sw = tx.getBoundingClientRect().width;
+      const fast = performance.now() - (st.keyAt || 0) < 400;
+      drawStrike(tl, tx, id, st.reduced ? false : fast ? 'fast' : 'full');
+      tx.style.transition = '';
+      if (!st.reduced && !fast) tx.animate([{ fontStretch: '100%' }, { fontStretch: '88%' }], { duration: 200, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
     } else if (el._strikeQ === 'static' || (el._sw && Math.abs(el._sw - w) > 1) || !tl.querySelector('svg.strike')) {
       el._strikeQ = null; el._sw = w;
       drawStrike(tl, el._tx, id, false);
@@ -338,10 +373,10 @@ function renderEmpty() {
     }
   }
   if (!e.hidden) {
-    const key = st.touch ? 'Tap ＋ to add one.' : 'Press Q to add one, or Enter to start typing.';
+    const key = st.touch ? 'Tap + to add one.' : 'Press Q to add one, or Enter to start typing.';
     const msg = {
       inbox: ['Inbox is empty.', key],
-      today: ['Nothing scheduled for today.', st.touch ? 'Tap ＋ to add one.' : 'Press Q to add one.'],
+      today: ['Nothing scheduled for today.', st.touch ? 'Tap + to add one.' : 'Press Q to add one.'],
       upcoming: ['Nothing coming up.', 'Give an item a date and it shows here.'],
       someday: ['Nothing for someday.', 'Items without a date, kept for later.'],
       logbook: ['No completed items yet.', ''],

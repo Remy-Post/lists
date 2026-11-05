@@ -348,7 +348,7 @@ function qTodayRaw(today) {
 /** Items done today that would have been in Today (for the "struck through" view). */
 export function qDoneToday(todayStart) {
   const out = [];
-  for (const [id] of recs) if (isLive(id) && val(id, 'done') && (val(id, 'doneAt') || 0) >= todayStart && val(id, 'kind') === 'item') out.push(id);
+  for (const [id] of recs) if (isLive(id) && val(id, 'done') && (val(id, 'doneAt') || 0) >= todayStart && (val(id, 'kind') === 'item' || val(id, 'kind') === 'log')) out.push(id);
   return out.sort((a, b) => val(a, 'doneAt') - val(b, 'doneAt'));
 }
 export function qUpcoming(today) {
@@ -367,7 +367,7 @@ export function qOverdue(today) {
 }
 export function qLogbook(limit = 400) {
   const out = [];
-  for (const [id] of recs) if (isLive(id) && val(id, 'done') && val(id, 'kind') === 'item') out.push(id);
+  for (const [id] of recs) if (isLive(id) && val(id, 'done') && (val(id, 'kind') === 'item' || val(id, 'kind') === 'log')) out.push(id);
   return out.sort((a, b) => (val(b, 'doneAt') || 0) - (val(a, 'doneAt') || 0)).slice(0, limit);
 }
 export function qTrash() {

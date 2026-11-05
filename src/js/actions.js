@@ -58,7 +58,9 @@ export function quickAdd(text, at, ignore) {
 }
 export function fieldsFromParse(p) {
   const f = { title: p.title };
-  if (p.when) f.when = p.when;
+  // Explicit grammar beats the view's defaults (req-dates-views-8).
+  if (p.someday) { f.when = null; f.evening = false; }
+  if (p.when) { f.when = p.when; f.someday = false; }
   if (p.evening) f.evening = true;
   if (p.someday) f.someday = true;
   if (p.deadline) f.deadline = p.deadline;
@@ -116,11 +118,16 @@ export function toggleDone(ids = target()) {
 function repeat(id, rr, now) {
   // Log this occurrence, then roll the original forward and reset its checklist.
   const base = S.val(id, 'when') || today();
+  // The log keeps the occurrence's date, so it stays struck in Today and lands in the Logbook.
   O.create({
     kind: 'log', title: S.val(id, 'title'), notes: S.val(id, 'notes'), done: true, doneAt: now,
+    when: base <= today() ? base : today(), evening: S.val(id, 'evening'), deadline: S.val(id, 'deadline'),
     pos: S.posAt(S.parentOf(id), S.children(S.parentOf(id)).length), origin: id,
   });
-  const next = nextOccurrence(rr, base, S.val(id, 'repeatFrom') || 'when', today());
+  const mode = S.val(id, 'repeatFrom') || 'when';
+  let next = nextOccurrence(rr, base, mode, today());
+  // An overdue on-schedule repeat rolls to the first occurrence on or after today (req-dates-views-2).
+  for (let i = 0; mode === 'when' && next && next < today() && i < 1000; i++) next = nextOccurrence(rr, next, mode, today());
   const f = { when: next };
   const dl = S.val(id, 'deadline'), w = S.val(id, 'when');
   if (dl && w) f.deadline = addDays(next, Math.round((fromYMD(dl) - fromYMD(w)) / 864e5));
@@ -130,7 +137,10 @@ function repeat(id, rr, now) {
 }
 
 /* -------- structure -------- */
+let collapsedChanged = () => {};
+export const onCollapsedChange = (fn) => { collapsedChanged = fn; };
 export function indent(ids = target()) {
+  if (!outlinePage()) return false; // smart views: the tree sibling isn't on screen (req-outline-10)
   const list = tops(ids);
   let moved = false;
   O.tx('Indent', () => {
@@ -138,15 +148,16 @@ export function indent(ids = target()) {
       const p = S.parentOf(id), sib = S.children(p).filter((x) => x === id || visible(x)), i = sib.indexOf(id);
       let np = null;
       for (let j = i - 1; j >= 0; j--) if (!list.includes(sib[j])) { np = sib[j]; break; }
-      if (!np || !S.canMove(id, np)) continue;
+      if (!np || !S.canMove(id, np) || S.val(np, 'kind') === 'log') continue;
       O.set(id, { pos: S.posAt(np, S.children(np).length, id, p) });
-      st.collapsed.delete(np);
+      if (st.collapsed.delete(np)) collapsedChanged();
       moved = true;
     }
   }, { ctx: ctx() });
   return moved;
 }
 export function outdent(ids = target()) {
+  if (!outlinePage()) return false;
   const list = tops(ids).reverse();
   const root = pageRoot();
   let moved = false;
@@ -244,19 +255,20 @@ export function nudge(days, ids = target()) {
   O.tx('Reschedule', () => {
     for (const id of ids) {
       const w = S.val(id, 'when');
+      // Scheduled items move from their date; unscheduled or overdue ones move from today. Never into the past.
       const t = today();
       const base = w && w >= t ? w : t;
-      let next = addDays(base, w ? days : Math.max(0, days - (days > 0 ? 1 : 0)));
-      if (next < t) next = t; // never schedule into the past (audit S3-9)
+      let next = addDays(base, days);
+      if (next < t) next = t;
       O.set(id, { when: next, someday: false });
     }
   }, { ctx: ctx(), merge: 'nudge:' + ids.join() });
 }
 export function rescueOverdue() {
   const t = today();
-  const ids = S.qOverdue(t);
+  const ids = S.qOverdue(t).filter((id) => S.val(id, 'when') && S.val(id, 'when') < t);
   if (!ids.length) return 0;
-  O.tx('Move overdue to Today', () => { for (const id of ids) { if (S.val(id, 'when') && S.val(id, 'when') < t) O.set(id, { when: t }); } }, { ctx: ctx() });
+  O.tx('Move overdue to Today', () => { for (const id of ids) O.set(id, { when: t }); }, { ctx: ctx() });
   return ids.length;
 }
 export function setPriority(ids, p) {
@@ -271,7 +283,7 @@ export function cyclePriority(ids = target()) {
 /* -------- lists -------- */
 export function newList(title = '') {
   const roots = S.children(S.ROOT);
-  return O.tx('New list', () => O.create({ kind: 'item', title, pos: S.posAt(S.ROOT, roots.length) }));
+  return O.tx('New list', () => O.create({ kind: 'item', title, pos: S.posAt(S.ROOT, roots.length) }), { ctx: ctx() });
 }
 
 /* -------- paste: many lines become many items, indentation becomes nesting -------- */
@@ -314,6 +326,53 @@ export function pasteOutline(text, parent, index, topFields = {}) {
     }
   }, { ctx: ctx() });
   return ids;
+}
+
+/* -------- Markdown import (reads what toMarkdown writes: # lists, - [ ] items, **headings**, <!-- dates -->, > notes) -------- */
+export function importMarkdown(text, fallbackTitle) {
+  const blocks = [];
+  let cur = null;
+  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
+    const hm = line.match(/^#\s+(.*)$/);
+    if (hm) { cur = { title: hm[1].trim(), lines: [] }; blocks.push(cur); continue; }
+    if (!cur) { cur = { title: fallbackTitle || 'Imported', lines: [] }; blocks.push(cur); }
+    cur.lines.push(line);
+  }
+  const made = [];
+  O.tx('Import', () => {
+    for (const b of blocks) {
+      if (!b.lines.some((l) => l.trim())) continue;
+      const list = O.create({ title: b.title, pos: S.posAt(S.ROOT, S.children(S.ROOT).length) });
+      made.push(list);
+      // Pull notes ("> …") and date comments off before outline parsing, keyed by the item line they follow.
+      const items = [], extras = [];
+      for (const l of b.lines) {
+        const note = l.match(/^\s*>\s?(.*)$/);
+        if (note && items.length) { (extras[items.length - 1] ||= { notes: [] }).notes.push(note[1]); continue; }
+        if (!l.trim()) continue;
+        const meta = l.match(/<!--\s*(.*?)\s*-->/);
+        let line = l.replace(/\s*<!--.*?-->\s*$/, '');
+        const head = line.match(/^(\s*)-\s+\*\*(.+)\*\*\s*$/);
+        if (head) line = head[1] + '- ' + head[2];
+        items.push(line);
+        const x = (extras[items.length - 1] ||= { notes: [] });
+        if (head) x.heading = true;
+        if (meta) { const w = meta[1].match(/when:(\d{4}-\d{2}-\d{2})/), d = meta[1].match(/due:(\d{4}-\d{2}-\d{2})/); if (w) x.when = w[1]; if (d) x.deadline = d[1]; }
+      }
+      const ids = pasteOutline(items.join('\n'), list, 0);
+      ids.forEach((id, i) => {
+        const x = extras[i];
+        if (!x) return;
+        const f = {};
+        if (x.notes.length) f.notes = x.notes.join('\n');
+        if (x.heading) f.heading = true;
+        if (x.when) f.when = x.when;
+        if (x.deadline) f.deadline = x.deadline;
+        if (Object.keys(f).length) O.set(id, f);
+      });
+    }
+  }, { ctx: ctx() });
+  return made;
 }
 
 /* -------- export -------- */

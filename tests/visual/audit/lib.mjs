@@ -22,7 +22,7 @@ export async function launch() {
 
 /** New context + page with the fixture seeded, then a second navigation so the optional fonts are cached. */
 export async function openSeeded(browser, dev, scheme, opts = {}) {
-  const ctx = await browser.newContext({ ...DEVICES[dev], colorScheme: scheme, reducedMotion: opts.reduced ? 'reduce' : 'no-preference' });
+  const ctx = await browser.newContext({ ...DEVICES[dev], colorScheme: scheme, reducedMotion: opts.reduced ? 'reduce' : 'no-preference', serviceWorkers: 'block' });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${dev}/${scheme}] pageerror:`, e.message));
   await page.goto(BASE + '/#/today');

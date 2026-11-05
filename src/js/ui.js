@@ -44,12 +44,19 @@ export function open(panel, o = {}) {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   });
   requestAnimationFrame(() => wrap.classList.add('in'));
+  $('#app').inert = true;
+  if (!o.noFocus) setTimeout(() => {
+    if (panel.contains(document.activeElement)) return;
+    const f = panel.querySelector('input, textarea, button:not(.grab), [href], [tabindex]:not([tabindex="-1"])');
+    if (f) f.focus({ preventScroll: true }); else { panel.tabIndex = -1; panel.focus({ preventScroll: true }); }
+  }, 30);
   return entry;
 }
 export function close(entry, restore = true) {
   const i = stack.indexOf(entry);
   if (i < 0) return;
   stack.splice(i, 1);
+  if (!stack.length) $('#app').inert = false;
   entry.wrap.classList.remove('in');
   entry.wrap.classList.add('out');
   const rm = () => entry.wrap.remove();
@@ -83,14 +90,22 @@ addEventListener('keydown', (e) => { if (e.key === 'Escape' && stack.length) { e
 
 /* ---------------- toasts ---------------- */
 let toastEl = null, toastT = 0;
+const toastRegion = () => {
+  if (!toastEl) { toastEl = h('div', { class: 'toast', role: 'status', 'aria-live': 'polite' }); toastEl.inert = true; document.body.append(toastEl); }
+  return toastEl;
+};
+queueMicrotask(toastRegion); // the live region must exist before its first message, or it isn't announced
 ui.toast = (msg, o = {}) => {
-  if (!toastEl) { toastEl = h('div', { class: 'toast', role: 'status', 'aria-live': 'polite' }); document.body.append(toastEl); }
+  toastRegion();
   toastEl.replaceChildren(h('span', null, msg));
-  if (o.undo) toastEl.append(h('button', { class: 'tbtn', onclick: () => { ui.undo(); hide(); } }, 'Undo'));
+  // Undo applies to the step this toast announced, never to something newer.
+  const step = o.undo ? O.peekUndo() : null;
+  if (o.undo) toastEl.append(h('button', { class: 'tbtn', onclick: () => { if (O.peekUndo() === step) ui.undo(); else ui.toast('That was already changed'); hide(); } }, 'Undo'));
   if (o.action) toastEl.append(h('button', { class: 'tbtn', onclick: () => { o.action.run(); hide(); } }, o.action.label));
   toastEl.classList.add('in');
+  toastEl.inert = false;
   clearTimeout(toastT);
-  const hide = () => toastEl.classList.remove('in');
+  const hide = () => { toastEl.classList.remove('in'); toastEl.inert = true; };
   toastT = setTimeout(hide, o.ms || (o.undo ? 5200 : 2600));
 };
 A.setNotify((kind, ids) => {
@@ -149,21 +164,24 @@ function fillInsp(id) {
   const path = h('nav', { class: 'i-path', 'aria-label': 'Location' },
     ...anc.map((a) => h('a', { href: '#/' + (a === S.INBOX ? 'inbox' : 'n/' + a) }, a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled')));
   const w = v('when'), dl = v('deadline');
-  const whenTxt = w ? (formatDay(w, new Date()) + (v('evening') ? ', evening' : '')) : v('someday') ? 'Someday' : 'Not scheduled';
-  const field = (label, value, onclick, cls = '') => h('button', { class: 'i-field ' + cls, onclick }, h('span', { class: 'k' }, label), h('span', { class: 'v' }, value));
-  const repeat = h('input', { class: 'i-rep', 'data-f': 'repeat', placeholder: 'every monday, every! 2 weeks…', 'aria-label': 'Repeat' });
+  const whenTxt = w ? (formatDay(w, new Date()) + (v('evening') ? ', evening' : '')) : v('someday') ? 'Someday' : '';
+  const field = (label, value, onclick, cls = '') => h('button', { class: 'i-field ' + cls, onclick }, h('span', { class: 'k' }, label), h('span', { class: 'v' + (value ? '' : ' none') }, value || 'Add…'));
+  const repeat = h('input', { class: 'i-rep', 'data-f': 'repeat', placeholder: 'Never', 'aria-label': 'Repeat, for example every monday' });
   repeat.value = v('rrule') ? safe(() => describeRRule(v('rrule'))) : '';
   repeat.addEventListener('change', () => {
     const txt = repeat.value.trim();
     if (!txt) { save({ rrule: null }); return; }
     const p = parseQuick('x ' + (/^(every|after)/i.test(txt) ? txt : 'every ' + txt));
-    if (p.rrule) { save({ rrule: p.rrule, repeatFrom: p.repeatFrom, ...(v('when') ? {} : { when: p.when }) }); repeat.value = safe(() => describeRRule(p.rrule)); }
+    const explicit = /every!|^after/i.test(txt);
+    if (p.rrule) { save({ rrule: p.rrule, repeatFrom: explicit ? p.repeatFrom : v('repeatFrom') || 'when', ...(v('when') ? {} : { when: p.when }) }); repeat.value = safe(() => describeRRule(p.rrule)); fillInsp(id); }
     else { repeat.value = v('rrule') ? safe(() => describeRRule(v('rrule'))) : ''; ui.toast('Try “every monday” or “every! 3 days”'); }
   });
   const pri = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Priority' },
     ...['None', '!', '!!', '!!!'].map((lbl, i) => h('button', { role: 'radio', 'aria-checked': String(v('priority') === i), class: v('priority') === i ? 'on' : '', onclick: () => { save({ priority: i }); fillInsp(id); } }, lbl)));
   const kids = S.hasChildren(id);
-  el.replaceChildren(
+  const repMode = v('rrule') ? h('div', { class: 'seg sm', role: 'radiogroup', 'aria-label': 'Repeat from' },
+    ...[['when', 'On schedule'], ['done', 'After done']].map(([k, l]) => h('button', { role: 'radio', 'aria-checked': String((v('repeatFrom') || 'when') === k), class: (v('repeatFrom') || 'when') === k ? 'on' : '', onclick: () => { save({ repeatFrom: k }); fillInsp(id); } }, l))) : null;
+  el.replaceChildren(...[
     h('div', { class: 'i-top' },
       h('button', { class: 'ck big' + (v('done') ? ' on' : ''), role: 'checkbox', 'aria-checked': String(!!v('done')), 'aria-label': 'Complete', html: ICON.check, onclick: () => { A.toggleDone([id]); renderPage(); renderSide(); fillInsp(id); } }),
       title),
@@ -173,15 +191,16 @@ function fillInsp(id) {
       field('When', whenTxt, (e) => ui.datePicker([id], 'when', e.currentTarget)),
       field('Deadline', dl ? formatDay(dl, new Date()) : 'None', (e) => ui.datePicker([id], 'deadline', e.currentTarget), dl && dl < A.today() && !v('done') ? 'late' : ''),
       h('label', { class: 'i-field' }, h('span', { class: 'k' }, 'Repeat'), repeat),
+      repMode ? h('div', { class: 'i-field' }, h('span', { class: 'k' }, ''), repMode) : null,
       h('div', { class: 'i-field' }, h('span', { class: 'k' }, 'Priority'), pri)),
     h('div', { class: 'i-acts' },
       h('button', { class: 'btn', onclick: () => ui.go({ view: 'node', id }, 'pointer') }, kids ? `Open (${S.countOpen(id)} open)` : 'Open as page'),
       h('button', { class: 'btn', onclick: () => { st.sel = new Set([id]); st.cursor = id; ui.palette('move'); } }, 'Move…'),
       h('button', { class: 'btn', onclick: () => { A.toggleHeading([id]); renderPage(); fillInsp(id); } }, v('heading') ? 'Make item' : 'Make heading'),
       h('button', { class: 'btn danger', onclick: () => { A.trash([id]); ui.closeInsp(); renderPage({ flip: true }); renderSide(); } }, 'Delete')),
-    h('p', { class: 'i-meta' }, [v('created') ? 'Created ' + new Date(v('created')).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '', v('done') && v('doneAt') ? 'Completed ' + new Date(v('doneAt')).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''].filter(Boolean).join(' · ')),
+    h('p', { class: 'i-meta' }, ...[v('created') ? 'Created ' + new Date(v('created')).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '', v('done') && v('doneAt') ? 'Completed ' + new Date(v('doneAt')).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''].filter(Boolean).map((t) => h('span', null, t))),
     insp.docked ? h('button', { class: 'i-close', 'aria-label': 'Close details', onclick: () => ui.closeInsp(), html: '<svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3 3 9"/></svg>' }) : null,
-  );
+  ].filter(Boolean));
   requestAnimationFrame(() => { autosize(title); autosize(notes); });
 }
 const safe = (f) => { try { return f(); } catch { return ''; } };
@@ -195,8 +214,9 @@ ui.datePicker = (ids, mode, anchor) => {
   const cur = S.val(ids[0], mode);
   let month = fromYMD(cur || A.today()); month.setDate(1);
   const input = h('input', { class: 'dp-in', placeholder: mode === 'when' ? 'When? tomorrow, fri, in 3 days…' : 'Deadline? fri, nov 30…', 'aria-label': mode === 'when' ? 'When' : 'Deadline', autocomplete: 'off', enterkeyhint: 'done' });
-  const sugg = h('div', { class: 'dp-sugg', role: 'listbox' });
-  const grid = h('div', { class: 'dp-grid', role: 'grid' });
+  const sugg = h('div', { class: 'dp-sugg', role: 'listbox', id: 'dp-sugg' });
+  input.setAttribute('role', 'combobox'); input.setAttribute('aria-controls', 'dp-sugg'); input.setAttribute('aria-expanded', 'true');
+  const grid = h('div', { class: 'dp-grid', role: 'group', 'aria-label': 'Calendar' });
   const head = h('div', { class: 'dp-head' });
   const pick = (d, o = {}) => {
     if (mode === 'when') A.setWhen(ids, d, o); else A.setDeadline(ids, d);
@@ -213,8 +233,9 @@ ui.datePicker = (ids, mode, anchor) => {
   const drawSugg = () => {
     const q = input.value.trim();
     opts = q ? suggestDates(q, new Date()).slice(0, 5) : [];
-    sugg.replaceChildren(...opts.map((o, i) => h('button', { class: 'opt' + (i === active ? ' on' : ''), role: 'option', onclick: () => pick(o.date, { evening: o.evening, someday: o.someday }) },
-      h('span', null, o.label), h('span', { class: 'muted' }, o.date ? formatDay(o.date, new Date()) : ''))));
+    sugg.replaceChildren(...opts.map((o, i) => h('button', { class: 'opt' + (i === active ? ' on' : ''), id: 'dp-opt-' + i, role: 'option', 'aria-selected': String(i === active), onclick: () => pick(o.date, { evening: o.evening, someday: o.someday }) },
+      h('span', null, o.label), h('span', { class: 'muted' }, o.date && formatDay(o.date, new Date()) !== o.label ? fromYMD(o.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) : ''))));
+    if (active >= 0 && opts[active]) input.setAttribute('aria-activedescendant', 'dp-opt-' + active); else input.removeAttribute('aria-activedescendant');
   };
   input.addEventListener('input', () => { active = opts.length ? 0 : -1; drawSugg(); if (active < 0 && opts.length) active = 0; drawSugg(); });
   input.addEventListener('keydown', (e) => {
@@ -234,7 +255,7 @@ ui.datePicker = (ids, mode, anchor) => {
     for (let i = 0; i < lead; i++) cells.push(h('span'));
     for (let d = 1; d <= days; d++) {
       const y = ymd(new Date(month.getFullYear(), month.getMonth(), d));
-      cells.push(h('button', { class: 'day' + (y === t ? ' today' : '') + (y === cur ? ' on' : '') + (y < t ? ' past' : ''), 'aria-label': new Date(month.getFullYear(), month.getMonth(), d).toDateString(), onclick: () => pick(y) }, String(d)));
+      cells.push(h('button', { class: 'day' + (y === t ? ' today' : '') + (y === cur ? ' on' : '') + (y < t ? ' past' : ''), 'aria-label': new Date(month.getFullYear(), month.getMonth(), d).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }), 'aria-current': y === t ? 'date' : null, 'aria-pressed': y === cur ? 'true' : null, onclick: () => pick(y) }, String(d)));
     }
     grid.replaceChildren(...cells);
   };
@@ -248,7 +269,7 @@ function friday() { const d = new Date(); d.setDate(d.getDate() + ((5 - d.getDay
 
 /* ---------------- composer (quick add) ---------------- */
 ui.compose = (at) => {
-  const ta = h('input', { class: 'qa-in', placeholder: 'New item — try “Call Ana fri !” or “Pay rent every 1st”', 'aria-label': 'New item', autocomplete: 'off', enterkeyhint: 'enter', spellcheck: 'false' });
+  const ta = h('textarea', { class: 'qa-in', rows: '1', placeholder: 'New item — try “Call Ana fri !” or “Pay rent every 1st”', 'aria-label': 'New item', autocomplete: 'off', enterkeyhint: 'done', spellcheck: 'false' });
   const mirror = h('div', { class: 'qa-mirror', 'aria-hidden': 'true' });
   const preview = h('div', { class: 'qa-prev', 'aria-live': 'polite' });
   const where = h('div', { class: 'qa-where' });
@@ -264,7 +285,7 @@ ui.compose = (at) => {
     for (const t of p.tokens || []) { frag.push(esc(text.slice(i, t.start)), `<mark class="k-${t.kind}">${esc(text.slice(t.start, t.end))}</mark>`); i = t.end; }
     frag.push(esc(text.slice(i)) + ' ');
     mirror.innerHTML = frag.join('');
-    mirror.scrollLeft = ta.scrollLeft;
+    ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px';
     const bits = [];
     if (p.when) bits.push((p.evening ? 'This evening' : formatDay(p.when, new Date())) + (p.time ? ' ' + p.time : ''));
     if (p.someday) bits.push('Someday');
@@ -273,32 +294,48 @@ ui.compose = (at) => {
     if (p.rrule) bits.push(safe(() => describeRRule(p.rrule)) + (p.repeatFrom === 'done' ? ' after completion' : ''));
     if (p.tags && p.tags.length) bits.push(p.tags.map((t) => '@' + t).join(' '));
     const l = p.list ? A.findList(p.list) : null;
-    where.textContent = '→ ' + (l ? S.val(l, 'title') : p.list ? `${tname} (no list “${p.list}”)` : tname);
-    preview.textContent = bits.join(' · ');
+    where.textContent = 'In ' + (l ? S.val(l, 'title') : p.list ? `${tname} (no list “${p.list}”)` : tname);
+    preview.replaceChildren(...bits.map((b) => h('span', null, b)));
     DB.setMeta('draft', text);
   };
-  ta.addEventListener('input', () => { ignore = ignore.filter(([s, e]) => e <= ta.value.length); draw(); });
-  ta.addEventListener('scroll', () => { mirror.scrollLeft = ta.scrollLeft; });
+  let prevVal = ta.value;
+  ta.addEventListener('input', () => {
+    // Keep literal spans attached to their text when the user edits before them (req-dates-views-9).
+    const v = ta.value, d = v.length - prevVal.length, at = ta.selectionStart - Math.max(d, 0);
+    ignore = ignore.filter(([s, e]) => e <= at || s >= at + Math.max(-d, 0)).map(([s, e]) => (s >= at ? [s + d, e + d] : [s, e])).filter(([s, e]) => e <= v.length);
+    prevVal = v;
+    if (/\n/.test(v)) { ta.value = v.replace(/\n+/g, ' '); prevVal = ta.value; }
+    draw();
+  });
   ta.addEventListener('click', () => {
     const c = ta.selectionStart;
     const p = parseQuick(ta.value, new Date(), { ignore });
-    const t = (p.tokens || []).find((x) => c > x.start && c < x.end);
+    const t = (p.tokens || []).find((x) => c >= x.start && c <= x.end);
     if (t) { ignore.push([t.start, t.end]); draw(); }
   });
+  ta.addEventListener('paste', (e) => {
+    const text = e.clipboardData.getData('text/plain');
+    if (!/\n/.test(text.trim())) return;
+    // Many lines: an outline, not a title (req-outline-04).
+    e.preventDefault();
+    const ids = A.pasteOutline(text, target.parent, target.index ?? S.children(target.parent).length, target.fields || {});
+    close(entry); renderPage({ flip: true }); renderSide();
+    ui.toast(`Added ${ids.length} items`, { undo: true });
+  });
+  const submit = (closeAfter) => {
+    if (!ta.value.trim()) { close(entry); return; }
+    const id = A.quickAdd(ta.value, target, ignore);
+    if (id) { haptic(6); renderPage({ flip: true }); renderSide(); ui.toast('Added', { undo: true, ms: 1800 }); }
+    ta.value = ''; prevVal = ''; ignore = []; DB.setMeta('draft', ''); draw();
+    if (closeAfter) close(entry); else ta.focus();
+  };
   ta.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.isComposing) {
-      e.preventDefault();
-      if (!ta.value.trim()) { close(entry); return; }
-      const id = A.quickAdd(ta.value, target, ignore);
-      if (id) { haptic(6); renderPage({ flip: true }); renderSide(); ui.toast('Added', { undo: true, ms: 1800 }); }
-      ta.value = ''; ignore = []; DB.setMeta('draft', ''); draw();
-      if (e.metaKey || e.ctrlKey) close(entry);
-    }
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submit(e.metaKey || e.ctrlKey); }
   });
   const panel = h('section', { class: 'qa' },
     h('div', { class: 'qa-field' }, mirror, ta),
     h('div', { class: 'qa-foot' }, where, preview,
-      h('span', { class: 'qa-hint' }, st.touch ? '' : '↵ add · Esc close')));
+      st.touch ? h('button', { class: 'btn primary qa-add', onclick: () => submit(false) }, 'Add') : h('span', { class: 'qa-hint' }, h('kbd', null, 'Return'), ' adds, ', h('kbd', null, 'Esc'), ' closes')));
   const entry = open(panel, { kind: phone() ? 'sheet' : 'modal', label: 'Quick add' });
   draw();
   setTimeout(() => ta.focus(), 20);
@@ -306,7 +343,9 @@ ui.compose = (at) => {
 const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
 /* ---------------- palette ---------------- */
+let palOpen = null;
 ui.palette = (mode = 'all') => {
+  if (palOpen) { palOpen.querySelector('input').focus(); return; }
   const input = h('input', { class: 'pal-in', placeholder: mode === 'move' ? 'Move to…' : 'Type a command or search', 'aria-label': 'Command', autocomplete: 'off', spellcheck: 'false', role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'pal-list' });
   const list = h('div', { class: 'pal-list', id: 'pal-list', role: 'listbox' });
   let items = [], active = 0;
@@ -334,13 +373,21 @@ ui.palette = (mode = 'all') => {
       if (q) for (const id of S.search(q, 30)) {
         items.push({ label: S.val(id, 'title') || 'Untitled', sub: pathOf(id), done: S.val(id, 'done'), run: () => reveal(id) });
       }
-      if (!q) items = items.slice(0, 12);
+      if (!q) {
+        // Empty query: where you might go, then what you can do to the selection (visual S2-15).
+        const go = [['Inbox', { view: 'inbox' }], ['Today', { view: 'today' }], ['Upcoming', { view: 'upcoming' }], ['Someday', { view: 'someday' }], ['Logbook', { view: 'logbook' }]]
+          .map(([l, r]) => ({ label: l, sub: 'Go to', run: () => ui.go(r, 'key') }));
+        const lists = S.children(S.ROOT).filter((x) => x !== S.INBOX).slice(0, 6).map((x) => ({ label: S.val(x, 'title') || 'Untitled', sub: 'List', run: () => ui.go({ view: 'node', id: x }, 'key') }));
+        const verbs = ['done', 'when', 'move', 'quick', 'help'].map((k) => commands.find((c) => c.id === k)).filter((c) => c && (!c.test || c.test()))
+          .map((c) => ({ label: c.label, keys: c.keys.slice(0, 1).map(pretty), run: c.run, cmd: true }));
+        items = [...verbs, ...go, ...lists];
+      }
     }
     active = Math.min(active, Math.max(0, items.length - 1));
-    list.replaceChildren(...items.map((it, i) => h('div', { class: 'opt' + (i === active ? ' on' : '') + (it.done ? ' isdone' : ''), role: 'option', 'aria-selected': String(i === active), onpointerdown: (e) => { e.preventDefault(); run(i); } },
+    list.replaceChildren(...items.map((it, i) => h('div', { class: 'opt' + (i === active ? ' on' : '') + (it.done ? ' isdone' : ''), id: 'pal-opt-' + i, role: 'option', 'aria-selected': String(i === active), onpointerdown: (e) => e.preventDefault(), onclick: () => run(i) },
       h('span', { class: 'ol' }, it.label), it.sub ? h('span', { class: 'os' }, it.sub) : null, it.keys && it.keys[0] ? h('kbd', null, it.keys[0]) : null)));
     const on = list.children[active];
-    if (on) on.scrollIntoView({ block: 'nearest' });
+    if (on) { on.scrollIntoView({ block: 'nearest' }); input.setAttribute('aria-activedescendant', on.id); } else input.removeAttribute('aria-activedescendant');
   };
   const run = (i) => { const it = items[i]; if (!it) return; close(entry, !it.cmd); it.run(); };
   input.addEventListener('input', () => { active = 0; build(); });
@@ -350,7 +397,8 @@ ui.palette = (mode = 'all') => {
     else if (e.key === 'Enter') { e.preventDefault(); run(active); }
   });
   const panel = h('section', { class: 'pal' }, input, list);
-  const entry = open(panel, { kind: phone() ? 'sheet' : 'modal', label: 'Command palette' });
+  palOpen = panel;
+  const entry = open(panel, { kind: phone() ? 'sheet' : 'modal', label: 'Command palette', onClose: () => { palOpen = null; } });
   build();
   setTimeout(() => input.focus(), 20);
 };
@@ -359,10 +407,22 @@ function reveal(id) {
   const anc = S.ancestors(id);
   const top = anc[0];
   for (const a of anc) st.collapsed.delete(a);
+  ui.saveCollapsed();
+  if (!st.showDone && [id, ...anc].some((x) => !A.visible(x))) { st.showDone = true; ui.toast('Showing completed items'); }
   ui.go(top === S.INBOX ? { view: 'inbox' } : top ? { view: 'node', id: top } : { view: 'node', id }, 'key');
   if (rowEl(id)) ui.focus(id);
 }
 
+ui.restoreRecords = (recs) => {
+  O.tx('Restore backup', () => {
+    for (const r of recs) {
+      const f = {};
+      for (const k in r.f) if (k !== 'created' || !S.recs.has(r.id)) f[k] = r.f[k][0];
+      O.set(r.id, f);
+    }
+  });
+  renderPage(); renderSide();
+};
 /* ---------------- lazy panels (panels.js) ---------------- */
 let panels = null;
 const lazy = (name) => async (...a) => {
@@ -394,12 +454,13 @@ let acc = null;
 ui.accessory = (show) => {
   if (!st.touch) return;
   if (!acc) {
-    const b = (label, icon, fn) => h('button', { 'aria-label': label, onpointerdown: (e) => { e.preventDefault(); fn(); }, html: icon });
+    // pointerdown keeps the keyboard open; the action itself runs on click (keyboard and switch access too).
+    const b = (label, icon, fn) => h('button', { 'aria-label': label, onpointerdown: (e) => e.preventDefault(), onclick: fn, html: icon });
     const id = () => st.cursor;
     const keep = (fn) => structural.keepCaret(id(), fn);
     acc = h('div', { class: 'acc', role: 'toolbar', 'aria-label': 'Editing tools' },
-      b('Outdent', '<svg viewBox="0 0 20 20"><path d="M8 6 4 10l4 4M4 10h12"/></svg>', () => keep(() => A.outdent([id()]))),
-      b('Indent', '<svg viewBox="0 0 20 20"><path d="M12 6l4 4-4 4M16 10H4"/></svg>', () => keep(() => A.indent([id()]))),
+      b('Outdent', '<svg viewBox="0 0 20 20"><path d="M3.5 5h13M9.5 10h7M3.5 15h13M6.5 7.6 4 10l2.5 2.4"/></svg>', () => keep(() => A.outdent([id()]))),
+      b('Indent', '<svg viewBox="0 0 20 20"><path d="M3.5 5h13M9.5 10h7M3.5 15h13M4 7.6 6.5 10 4 12.4"/></svg>', () => keep(() => A.indent([id()]))),
       b('Move up', '<svg viewBox="0 0 20 20"><path d="M6 8l4-4 4 4M10 4v12"/></svg>', () => keep(() => A.moveBy(-1, [id()]))),
       b('Move down', '<svg viewBox="0 0 20 20"><path d="M6 12l4 4 4-4M10 16V4"/></svg>', () => keep(() => A.moveBy(1, [id()]))),
       h('span', { class: 'sp' }),
@@ -413,8 +474,23 @@ ui.accessory = (show) => {
     pos();
   }
   acc.classList.toggle('in', !!show);
+  acc.inert = !show;
   document.body.classList.toggle('typing', !!show);
 };
+
+/* ---------------- pairing confirmation ---------------- */
+ui.confirmPair = (code) => new Promise((resolve) => {
+  const groups = code.replace(/[^0-9A-Za-z]/g, '').toUpperCase().match(/.{1,4}/g) || [];
+  let done = false;
+  const finish = (v) => { if (done) return; done = true; close(entry); resolve(v); };
+  const panel = h('section', { class: 'pair' },
+    h('h2', null, 'Pair this device?'),
+    h('p', null, 'This link connects this device to an encrypted Lists account. Your lists here will be added to it and synced.'),
+    h('p', { class: 'muted' }, 'Only continue if you made this link on your own device. Check that the code there starts and ends like this:'),
+    h('code', { class: 'code' }, (groups[0] || '') + ' … ' + (groups[groups.length - 1] || '')),
+    h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => finish(true) }, 'Pair'), h('button', { class: 'btn', onclick: () => finish(false) }, 'Cancel')));
+  const entry = open(panel, { label: 'Pair this device', onClose: () => finish(false) });
+});
 
 /* ---------------- misc ---------------- */
 ui.escape = () => {

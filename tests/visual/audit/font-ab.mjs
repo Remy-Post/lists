@@ -4,7 +4,9 @@ import { launch, OUT, ROOT } from './lib.mjs';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-const files = { shipped: join(ROOT, 'src/fonts/mona-text.woff2'), source: join(OUT, 'mona-wdth-wght.woff2'), instrument: join(OUT, 'instrument.woff2') };
+// Usage: node tests/visual/audit/font-ab.mjs [other.woff2 ...] — compares the shipped font with any other webfonts given.
+const files = { shipped: join(ROOT, 'src/fonts/mona-text.woff2') };
+process.argv.slice(2).forEach((f, i) => { files['other' + i] = f; });
 const srv = createServer((q, r) => { const k = q.url.slice(1); if (files[k]) { r.writeHead(200, { 'content-type': 'font/woff2' }); r.end(readFileSync(files[k])); } else { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<!doctype html><body style="margin:0;background:#fff"></body>'); } }).listen(0);
 const base = 'http://127.0.0.1:' + srv.address().port;
 const b = await launch();
