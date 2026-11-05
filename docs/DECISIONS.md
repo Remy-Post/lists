@@ -17,8 +17,9 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 | Gate | Budget | Result |
 |---|---|---|
 | Critical path (HTML + CSS + JS) | ≤ 50 KB gz | 47.8 KB gz / 42.6 KB br, one JS file, no request chains |
-| Cold first paint, DevTools "3G" (2000 ms RTT, 50 KB/s), CPU ×4 | ≤ 5.0 s | 4.52 s median (5 runs) |
-| Repeat visit to interactive, "3G" | ≤ 1.0 s | 0.34 s; 0.64 s with 2,000 items |
+| Cold first paint, DevTools "3G" (2000 ms RTT, 50 KB/s), CPU ×4 | ≤ 5.0 s | 4.57 s median; interactive at 5.2 s (was 7.2 s); 137 KB on the wire (was 198 KB); no reload, no request chains |
+| Repeat visit to interactive, "3G" | ≤ 1.0 s | 0.31 s; 0.49 s with 2,000 items (all from the service worker) |
+| Sync gate under 3G | waits | 'Waiting for a good connection', 0 requests; syncs when the link is good and the backup stale |
 | SIGKILL 300 ms / 1 s after the last keystroke | 100% | 10/10, 10/10 |
 | Two-device sync convergence, cycle repair | identical trees | pass (22/22 checks) |
 | Rendering 500 rows (QA perf.mjs) | no long task > 50 ms, CPU ×1 | none (was 169 ms) |
