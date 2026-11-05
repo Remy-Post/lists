@@ -20,7 +20,19 @@ export const ICON = {
 
 const els = new Map();      // id → row element (current page)
 let pageKey = '';
-export const rowEl = (id) => els.get(id);
+let pendQ = [], pendBox = null;
+// Rows not yet streamed in are created on demand when something targets them (focus, reveal, zoom-out).
+export const rowEl = (id) => els.get(id) || drainTo(id);
+function drainTo(id) {
+  if (!pendQ.some((p) => p[0] === id)) return undefined;
+  const frag = document.createDocumentFragment();
+  while (pendQ.length) {
+    const [pid, m] = pendQ.shift(); const el = makeRow(pid); els.set(pid, el); fillRow(el, pid, m, false); frag.append(el);
+    if (pid === id) break;
+  }
+  pendBox.append(frag);
+  return els.get(id);
+}
 const todayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return +d; };
 
 /* ---------------- row model ---------------- */
@@ -122,14 +134,14 @@ function makeRow(id) {
 
 /** Everything a row's appearance depends on; if unchanged, the DOM is already right. */
 function sigOf(id, m, smart) {
-  const r = S.recs.get(id);
-  return (r ? r.v : '') + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
-    (st.collapsed.has(id) ? 1 : 0) + (st.sel.has(id) ? 1 : 0) + (st.cursor === id ? 1 : 0) + '|' + (S.hasChildren(id) ? S.countOpen(id) : -1) + '|' + (smart ? S.ancestors(id).join() : '');
+  return S.rev(id) + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
+    (st.collapsed.has(id) ? 1 : 0) + (st.sel.has(id) ? 1 : 0) + (st.cursor === id ? 1 : 0) + '|' + (S.hasChildren(id) ? S.countOpen(id) : -1) + '|' + (smart ? S.ancestors(id).map((a) => S.rev(a) + S.val(a, 'title')).join() : '') + '|' + (st.rows[0] === id ? 1 : 0);
 }
 export function fillRow(el, id, m, smart) {
   const sig = sigOf(id, m, smart);
   if (el._sig === sig && document.activeElement !== el._tx) return;
   el._sig = sig;
+  if (el._done && S.val(id, 'done')) strikeDirty.add(id); // refilled done row: re-measure its strike
   const done = S.val(id, 'done'), heading = S.val(id, 'heading');
   const kidsN = S.hasChildren(id);
   const collapsed = st.collapsed.has(id);
@@ -346,6 +358,7 @@ export function renderPage(opts = {}) {
   }
   for (const k of [...els.keys()]) if (!seen.has(k)) els.delete(k);
   reconcile(box, nodes);
+  pendQ = pend; pendBox = box;
   if (pend.length) {
     const step = () => {
       const part = pend.splice(0, CHUNK), frag = document.createDocumentFragment();
