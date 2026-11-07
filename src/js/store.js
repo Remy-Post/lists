@@ -112,12 +112,25 @@ const QUIET = new Set(['title', 'notes', 'priority', 'tags', 'rrule', 'repeatFro
 const revs = new Map();
 /** Local revision of a record: bumps on every local patch and every merged remote change. */
 export const rev = (id) => revs.get(id) || 0;
-function changed(id, structural, fields) {
+function changed(id, structural, fields, move) {
   version++;
   revs.set(id, (revs.get(id) || 0) + 1);
   // Typing a title can't change counts or smart views, so it keeps the memo (QA B1: no 10k walk per key).
-  if (structural || !fields || fields.some((f) => !QUIET.has(f))) memo.clear();
-  if (structural) { pendingStructural = true; orderCache = null; }
+  if (move) {
+    // Moves (indent, outdent, reorder, drag): shift counts between the two ancestor chains and refresh the
+    // moved subtree's open items; document order is recomputed lazily, only if a smart view sorts.
+    const t = memo.get('tree');
+    memo.clear();
+    if (t && treeMove(t, id, move.from, move.to)) memo.set('tree', t);
+  } else if (structural || !fields || fields.includes('kind')) memo.clear();
+  else if (fields.some((f) => !QUIET.has(f))) {
+    // Dates and completion don't change the tree's shape: keep the cached walk, drop the derived queries,
+    // and patch counts and open items for just this node's ancestors and subtree (QA perf, 10k at ×4).
+    const t = memo.get('tree');
+    for (const k of [...memo.keys()]) if (k !== 'tree') memo.delete(k);
+    if (t && (fields.includes('done') || fields.includes('heading')) && !treeDelta(t, id)) memo.delete('tree');
+  }
+  if (structural) pendingStructural = true;
   (pending ||= new Set()).add(id);
   pendingFields ||= new Set();
   if (fields) for (const f of fields) pendingFields.add(f); else pendingFields.add('*');
@@ -149,10 +162,16 @@ export function patch(id, fields) {
   }
   r.v = h;
   // A void node's children fall back to the Inbox, so voiding or un-voiding re-parents its subtree.
+  let move = null;
   if (wasVoid !== (r.f.deleted && r.f.deleted[0] === 'void') && childrenAll(id).length) rebuild();
-  else if (structural) reparent(id, oldParent);
+  else if (structural) {
+    const v0 = rebuilds;
+    reparent(id, oldParent);
+    // A plain move (only `pos` changed, no cycle repair): the cached walk can be patched instead of redone.
+    if (oldParent !== undefined && rebuilds === v0 && Object.keys(fields).every((k) => k === 'pos' || QUIET.has(k))) move = { from: oldParent, to: eff.get(id) };
+  }
   persistHook(r, true);
-  changed(id, structural, Object.keys(fields));
+  changed(id, structural, Object.keys(fields), move);
   return r;
 }
 
@@ -219,8 +238,10 @@ function reparent(id, oldParent) {
   insertSorted(p, id);
 }
 const pstamp = (id) => { const e = recs.get(id).f.pos; return e ? e[1] : ''; };
+let rebuilds = 0;
 function rebuild() {
-  eff.clear(); kids.clear(); orderCache = null;
+  rebuilds++;
+  eff.clear(); kids.clear();
   for (const id of recs.keys()) eff.set(id, rawParent(id));
   // Concurrent moves on two devices can form a cycle neither saw. Break it deterministically:
   // the most recent move in the cycle loses and falls back to its previous parent, then to Inbox.
@@ -278,28 +299,71 @@ export function doneEff(id) {
 /* One allocation-free walk per store version gives both the open count under every node and the list of
    open items for the smart views (it used to be two walks with filtered arrays at every level). */
 const fv = (r, k) => { const e = r.f[k]; return e ? e[0] : DEF[k]; };
+/** Incrementally apply a done/heading change on `id` to the cached walk. Returns false to force a full walk. */
+const bump = (t, start, d) => {
+  // Counts flow up like the full walk: a repeat-log's subtree counts toward the log itself but not past it.
+  for (let a = start; a !== undefined; a = eff.get(a)) {
+    t.open.set(a, (t.open.get(a) || 0) + d);
+    const ar = recs.get(a);
+    if (a === ROOT || (ar && fv(ar, 'kind') === 'log')) break;
+  }
+};
+/** Re-derive open-item membership for `id`'s subtree from its current ancestors. */
+function resubtree(t, id) {
+  let doneAbove = false;
+  for (let a = eff.get(id); a !== undefined && a !== ROOT; a = eff.get(a)) { const ar = recs.get(a); if (ar && fv(ar, 'done')) { doneAbove = true; break; } }
+  const visit = (c, da) => {
+    const rr = recs.get(c);
+    if (!rr || fv(rr, 'deleted')) return;
+    const d = da || fv(rr, 'done');
+    if (!d && !fv(rr, 'heading') && fv(rr, 'kind') === 'item') t.items.add(c); else t.items.delete(c);
+    const arr = kids.get(c);
+    if (arr) for (let i = 0; i < arr.length; i++) visit(arr[i], d);
+  };
+  visit(id, doneAbove);
+}
+function treeMove(t, id, from, to) {
+  const r = recs.get(id);
+  if (!r || !t.self.has(id) || (!t.open.has(from) && from !== ROOT)) return false;
+  if (fv(r, 'kind') !== 'log') {
+    const contrib = (t.open.get(id) || 0) + (t.self.get(id) ? 1 : 0);
+    if (contrib) { bump(t, from, -contrib); bump(t, to, contrib); }
+  }
+  if (!t.open.has(to)) t.open.set(to, 0);
+  resubtree(t, id);
+  return true;
+}
+function treeDelta(t, id) {
+  const r = recs.get(id);
+  if (!r || !t.self.has(id)) return false;
+  const was = t.self.get(id), now = !fv(r, 'done') && !fv(r, 'heading') && fv(r, 'kind') !== 'log';
+  if (was === undefined) return false;
+  if (was !== now) { bump(t, eff.get(id), now ? 1 : -1); t.self.set(id, now); }
+  resubtree(t, id);
+  return true;
+}
 function treeStats() {
   return memoize('tree', () => {
-    const open = new Map(), items = [], ord = new Map();
-    let seq = 0;
+    const open = new Map(), items = new Set(), self = new Map();
     const walk = (p, doneAbove) => {
       let n = 0;
       const arr = kids.get(p);
       if (arr) for (let i = 0; i < arr.length; i++) {
         const c = arr[i], r = recs.get(c);
         if (!r || fv(r, 'deleted')) continue;
-        ord.set(c, seq++);
         const kind = fv(r, 'kind'), done = fv(r, 'done'), heading = fv(r, 'heading');
         const d = doneAbove || done;
-        if (!d && !heading && kind === 'item') items.push(c);
+        if (!d && !heading && kind === 'item') items.add(c);
         const sub = walk(c, d);
-        if (kind !== 'log') n += sub + (!done && !heading ? 1 : 0);
+        const me = kind !== 'log' && !done && !heading;
+        self.set(c, me);
+        if (kind !== 'log') n += sub + (me ? 1 : 0);
       }
       open.set(p, n);
       return n;
     };
     walk(ROOT, false);
-    return { open, items, ord };
+    return { open, items, self };
   });
 }
 /** Open descendants (any depth): O(1) per call after one walk per store version. */
@@ -329,32 +393,41 @@ function rekey(parent) { // rare: two devices inserted at the same spot with equ
 }
 
 /* ---------------- Ordering & queries ---------------- */
-let orderCache = null;
 /** Document order of every live node, for stable sorting in smart views. */
 /** Document order of every live node: comes free with the one tree walk per store version. */
-export function order() { return treeStats().ord; }
+export function order() {
+  return memoize('ord', () => {
+    const m = new Map(); let i = 0;
+    const walk = (p) => {
+      const arr = kids.get(p);
+      if (arr) for (let k = 0; k < arr.length; k++) {
+        const c = arr[k], r = recs.get(c);
+        if (!r || (r.f.deleted && r.f.deleted[0])) continue;
+        m.set(c, i++); walk(c);
+      }
+    };
+    walk(ROOT);
+    return m;
+  });
+}
+/** Today's open count without sorting (the sidebar badge needs only the number). */
+export function qTodayCount(today) {
+  return memoize('todayN:' + today, () => {
+    let n = 0;
+    for (const id of treeStats().items) { const r = recs.get(id), w = fv(r, 'when'), dl = fv(r, 'deadline'); if ((w && w <= today) || (dl && dl <= today)) n++; }
+    return n;
+  });
+}
 const byOrder = (a, b) => (order().get(a) ?? 0) - (order().get(b) ?? 0);
 
 function liveOpenItems() { return treeStats().items; }
-function liveOpenItemsRaw() {
-  const out = [];
-  const walk = (p, doneAbove) => {
-    for (const c of children(p)) {
-      const d = doneAbove || val(c, 'done');
-      if (!d && !val(c, 'heading') && val(c, 'kind') === 'item') out.push(c);
-      walk(c, d);
-    }
-  };
-  walk(ROOT, false);
-  return out;
-}
 /** Today: scheduled on/before today, or deadline on/before today. Split by evening. */
 export function qToday(today) { return memoize('today:' + today, () => qTodayRaw(today)); }
 function qTodayRaw(today) {
   const day = [], eve = [];
   for (const id of liveOpenItems()) {
-    const w = val(id, 'when'), dl = val(id, 'deadline');
-    if ((w && w <= today) || (dl && dl <= today)) (val(id, 'evening') && w && w <= today ? eve : day).push(id);
+    const r = recs.get(id), w = fv(r, 'when'), dl = fv(r, 'deadline');
+    if ((w && w <= today) || (dl && dl <= today)) (fv(r, 'evening') && w && w <= today ? eve : day).push(id);
   }
   day.sort(byOrder); eve.sort(byOrder);
   return { day, eve };
@@ -364,7 +437,7 @@ export function qDoneToday(todayStart) {
   return memoize('doneToday:' + todayStart, () => {
     // order() holds exactly the live nodes (the tree walk skips deleted subtrees), so no ancestor walks here.
     const out = [];
-    for (const id of order().keys()) {
+    for (const id of treeStats().self.keys()) {
       const r = recs.get(id), k = fv(r, 'kind');
       if (fv(r, 'done') && (fv(r, 'doneAt') || 0) >= todayStart && (k === 'item' || k === 'log')) out.push(id);
     }
@@ -383,11 +456,11 @@ export function qUpcoming(today) {
   return [...m.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([d, ids]) => [d, ids.sort(byOrder)]);
 }
 export function qOverdue(today) {
-  return liveOpenItems().filter((id) => { const w = val(id, 'when'), dl = val(id, 'deadline'); return (w && w < today) || (dl && dl < today); });
+  return [...liveOpenItems()].filter((id) => { const w = val(id, 'when'), dl = val(id, 'deadline'); return (w && w < today) || (dl && dl < today); });
 }
 export function qLogbook(limit = 400) {
   const out = [];
-  for (const id of order().keys()) { const r = recs.get(id), k = fv(r, 'kind'); if (fv(r, 'done') && (k === 'item' || k === 'log')) out.push(id); }
+  for (const id of treeStats().self.keys()) { const r = recs.get(id), k = fv(r, 'kind'); if (fv(r, 'done') && (k === 'item' || k === 'log')) out.push(id); }
   return out.sort((a, b) => (val(b, 'doneAt') || 0) - (val(a, 'doneAt') || 0)).slice(0, limit);
 }
 export function qTrash() {
@@ -396,7 +469,7 @@ export function qTrash() {
   return out.sort((a, b) => (val(b, 'deletedAt') || 0) - (val(a, 'deletedAt') || 0));
 }
 export function qSomeday() {
-  return liveOpenItems().filter((id) => val(id, 'someday') && !val(id, 'when')).sort(byOrder);
+  return [...liveOpenItems()].filter((id) => val(id, 'someday') && !val(id, 'when')).sort(byOrder);
 }
 export function search(q, limit = 40) {
   q = q.trim().toLowerCase();

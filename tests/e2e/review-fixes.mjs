@@ -101,6 +101,24 @@ async function page(vp = { width: 1500, height: 900 }, extra = {}) {
   check('Mac: a completed item keeps its place in Today', first === after);
   await ctx.close();
 }
+{ // Markdown export → import round-trip (code now lives in the lazy panels chunk)
+  const { ctx, p } = await page();
+  await p.evaluate(() => { const { A, O, S } = window.__lists; O.tx('fx', () => {
+    const l = A.newList('Trip'); const a = O.create({ title: 'Pack', pos: S.posAt(l, 0), notes: 'passport\nadapter' });
+    O.create({ title: 'Socks', pos: S.posAt(a, 0), when: '2026-12-01' }); O.create({ title: 'Section', pos: S.posAt(l, 1), heading: true });
+    A.newList('Empty list'); }); });
+  const dl = p.waitForEvent('download'); await p.evaluate(() => window.__lists.ui.exportMd()); const file = await (await dl).path();
+  const md = (await import('node:fs')).readFileSync(file, 'utf8');
+  await p.evaluate(() => { const { O, S } = window.__lists; O.tx('wipe', () => { for (const id of S.children(S.ROOT)) if (id !== S.INBOX) O.set(id, { deleted: 'void' }); }); });
+  const fc = p.waitForEvent('filechooser'); await p.evaluate(() => window.__lists.ui.importFile()); await (await fc).setFiles({ name: 'lists.md', mimeType: 'text/markdown', buffer: Buffer.from(md) });
+  await p.waitForTimeout(400);
+  const r = await p.evaluate(() => { const { S } = window.__lists; const lists = S.children(S.ROOT).filter((x) => x !== S.INBOX).map((x) => S.val(x, 'title'));
+    const trip = S.children(S.ROOT).find((x) => S.val(x, 'title') === 'Trip'); const pack = trip && S.children(trip)[0]; const socks = pack && S.children(pack)[0]; const sec = trip && S.children(trip)[1];
+    return { lists, notes: pack && S.val(pack, 'notes'), socksWhen: socks && S.val(socks, 'when'), heading: sec && S.val(sec, 'heading') }; });
+  const ok = !r.lists.includes('Inbox') && r.lists.includes('Trip') && r.lists.includes('Empty list') && r.notes === 'passport\nadapter' && r.socksWhen === '2026-12-01' && r.heading === true;
+  check('Markdown export → import round-trips lists, nesting, notes, dates, headings, empty lists', ok, JSON.stringify(r));
+  await ctx.close();
+}
 // ---- virtualization (600 rows): focus survives the sliding window (v-1), off-window anchors (v-2), drag (v-3)
 async function bigList(p, n = 600) {
   return p.evaluate((n) => { const { A, O, S, ui } = window.__lists; let l; O.tx('fx', () => { l = A.newList('Big'); for (let i = 0; i < n; i++) O.create({ title: 'r' + i, pos: S.posAt(l, i) }); }); ui.go({ view: 'node', id: l }, 'key'); return l; }, n);

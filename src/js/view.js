@@ -37,6 +37,8 @@ export const rowEl = (id) => els.get(id) || ensureRow(id);
 function ensureRow(id) {
   const i = index.get(id);
   if (i == null || items[i].grp) return undefined;
+  if (growJob) { cancelAnimationFrame(growJob); growJob = 0; }
+  if (!virtual()) { renderWindow([0, items.length]); return els.get(id); } // short page still growing: finish it
   // Keep what's on screen and add the target's neighbourhood: nothing visible disappears (v-2). A far target
   // gets its own window; the caller scrolls to it.
   const v = withCursor(viewWindow()), near = [Math.max(0, i - 40), Math.min(items.length, i + 60)];
@@ -257,6 +259,7 @@ addEventListener('scroll', () => {
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0;
     if (virtual()) {
+      if (growJob) { cancelAnimationFrame(growJob); growJob = 0; }
       const r = withCursor(viewWindow());
       // Re-render only when the needed range isn't already covered (or the window grew needlessly large).
       if (r[0] < win[0] || r[1] > win[1] || win[1] - win[0] > (r[1] - r[0]) * 3) renderWindow(r);
@@ -401,11 +404,17 @@ function renderWindow([a, b]) {
   topSp.style.height = offs[a] + 'px';
   botSp.style.height = (offs[items.length] - offs[b]) + 'px';
 }
+// A freshly opened long page builds progressively: a first slice now, then a slice per frame, so no single
+// task has to style and lay out a whole screen of new rows on a slow device (QA perf, CPU ×4).
+const SLICE = 12;
+let growJob = 0;
 export function renderPage(opts = {}) {
   const r = st.route;
   const key = r.view + ':' + (r.id || '');
   const box = $('#outline');
-  if (key !== pageKey) { els.clear(); hcache.clear(); box.replaceChildren(); pageKey = key; }
+  if (growJob) { cancelAnimationFrame(growJob); growJob = 0; }
+  const fresh = key !== pageKey;
+  if (fresh) { els.clear(); hcache.clear(); box.replaceChildren(); pageKey = key; }
   const before = opts.flip ? measure() : new Map();
   const active = document.activeElement;
   rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 36;
@@ -427,7 +436,19 @@ export function renderPage(opts = {}) {
     }
   }
   computeOffsets();
-  renderWindow(withCursor(viewWindow()));
+  const full = withCursor(viewWindow());
+  if (fresh && full[1] - full[0] > SLICE) {
+    let end = full[0] + SLICE;
+    renderWindow([full[0], end]);
+    const grow = () => {
+      growJob = 0;
+      end = Math.min(full[1], end + SLICE);
+      renderWindow([full[0], Math.max(end, win[1])]);
+      queueStrikes();
+      if (end < full[1]) growJob = requestAnimationFrame(grow);
+    };
+    growJob = requestAnimationFrame(grow);
+  } else renderWindow(full);
   // Roving tabindex: exactly one row is a Tab stop (the cursor, else the first row).
   const stopId = st.cursor && index.has(st.cursor) ? st.cursor : st.rows[0];
   for (const el of box.querySelectorAll('.row[tabindex="0"]')) if (el.dataset.id !== stopId) el.tabIndex = -1;
@@ -512,8 +533,7 @@ function renderEmpty() {
 /* ---------------- sidebar ---------------- */
 export function renderSide() {
   const t = today();
-  const td = S.qToday(t);
-  const counts = { inbox: S.children(S.INBOX).filter((c) => !S.val(c, 'done')).length, today: td.day.length + td.eve.length };
+  const counts = { inbox: S.children(S.INBOX).filter((c) => !S.val(c, 'done')).length, today: S.qTodayCount(t) };
   for (const b of document.querySelectorAll('[data-nav]')) {
     const v = b.dataset.nav;
     const on = st.route.view === v || (v === 'inbox' && st.route.view === 'node' && S.ancestors(st.route.id)[0] === S.INBOX);

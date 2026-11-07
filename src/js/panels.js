@@ -1,9 +1,9 @@
 // panels.js — rarely used surfaces, loaded on demand (settings, pairing, shortcuts, import/export).
 // No imports on purpose: dependencies are passed in by install(), so the bundler can't hoist shared
 // modules into an extra chunk on the critical path. The service worker precaches this file.
-let S, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone;
+let S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone;
 export function install(d) {
-  ({ S, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone } = d);
+  ({ S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone } = d);
   wire();
 }
 function wire() {
@@ -106,7 +106,7 @@ function download(name, text, type) {
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
-ui.exportMd = () => { download(`lists-${A.today()}.md`, A.toMarkdown(), 'text/markdown'); ui.toast('Exported Markdown'); };
+ui.exportMd = () => { download(`lists-${A.today()}.md`, toMarkdown(), 'text/markdown'); ui.toast('Exported Markdown'); };
 ui.exportJson = () => { download(`lists-backup-${A.today()}.json`, JSON.stringify({ app: 'lists', v: 1, records: S.allRecords() }), 'application/json'); ui.toast('Exported backup'); };
 ui.importFile = (mode = 'merge') => {
   const inp = h('input', { type: 'file', accept: '.json,.md,.txt,text/plain,application/json' });
@@ -129,7 +129,7 @@ ui.importFile = (mode = 'merge') => {
           ui.toast(recs.length < j.records.length ? `Merged ${n} records, skipped ${j.records.length - recs.length} invalid` : `Merged ${n} records`);
         }
       } else {
-        const lists = A.importMarkdown(text, f.name.replace(/\.\w+$/, ''));
+        const lists = importMarkdown(text, f.name.replace(/\.\w+$/, ''));
         if (lists[0]) ui.go({ view: 'node', id: lists[0] }, 'key');
         ui.toast(lists.length === 1 ? 'Imported 1 list' : `Imported ${lists.length} lists`, { undo: true });
       }
@@ -155,4 +155,76 @@ function validRecord(r) {
   }
   return true;
 }
+}
+
+// Markdown import/export (moved from actions.js: only Settings uses them, so they load lazily).
+/* -------- Markdown import (reads what toMarkdown writes: # lists, - [ ] items, **headings**, <!-- dates -->, > notes) -------- */
+function importMarkdown(text, fallbackTitle) {
+  const blocks = [];
+  let cur = null;
+  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
+    const hm = line.match(/^#\s+(.*)$/);
+    if (hm) { cur = { title: hm[1].trim(), lines: [] }; blocks.push(cur); continue; }
+    if (!cur) { cur = { title: fallbackTitle || 'Imported', lines: [] }; blocks.push(cur); }
+    cur.lines.push(line);
+  }
+  const made = [];
+  O.tx('Import', () => {
+    for (const b of blocks) {
+      if (!b.lines.some((l) => l.trim()) && b.title === (fallbackTitle || 'Imported')) continue;
+      // The exported Inbox section goes back into the Inbox rather than becoming a list named "Inbox".
+      const list = b.title === 'Inbox' ? S.INBOX : O.create({ title: b.title, pos: S.posAt(S.ROOT, S.children(S.ROOT).length) });
+      if (list !== S.INBOX) made.push(list);
+      // Pull notes ("> …") and date comments off before outline parsing, keyed by the item line they follow.
+      const items = [], extras = [];
+      for (const l of b.lines) {
+        const note = l.match(/^\s*>\s?(.*)$/);
+        if (note && items.length) { (extras[items.length - 1] ||= { notes: [] }).notes.push(note[1]); continue; }
+        if (!l.trim()) continue;
+        const meta = l.match(/<!--\s*(.*?)\s*-->/);
+        let line = l.replace(/\s*<!--.*?-->\s*$/, '');
+        const head = line.match(/^(\s*)-\s+\*\*(.+)\*\*\s*$/);
+        if (head) line = head[1] + '- ' + head[2];
+        items.push(line);
+        const x = (extras[items.length - 1] ||= { notes: [] });
+        if (head) x.heading = true;
+        if (meta) { const w = meta[1].match(/when:(\d{4}-\d{2}-\d{2})/), d = meta[1].match(/due:(\d{4}-\d{2}-\d{2})/); if (w) x.when = w[1]; if (d) x.deadline = d[1]; }
+      }
+      const ids = A.pasteOutline(items.join('\n'), list, list === S.INBOX ? S.children(S.INBOX).length : 0);
+      ids.forEach((id, i) => {
+        const x = extras[i];
+        if (!x) return;
+        const f = {};
+        if (x.notes.length) f.notes = x.notes.join('\n');
+        if (x.heading) f.heading = true;
+        if (x.when) f.when = x.when;
+        if (x.deadline) f.deadline = x.deadline;
+        if (Object.keys(f).length) O.set(id, f);
+      });
+    }
+  }, { ctx: { route: { ...st.route }, sel: st.cursor } });
+  return made;
+}
+
+/* -------- export -------- */
+function toMarkdown(rootId = S.ROOT) {
+  const out = [];
+  const walk = (p, d) => {
+    for (const c of S.children(p)) {
+      if (S.val(c, 'kind') === 'log') continue;
+      const t = S.val(c, 'title');
+      const head = S.val(c, 'heading');
+      const meta = [];
+      if (S.val(c, 'when')) meta.push('when:' + S.val(c, 'when'));
+      if (S.val(c, 'deadline')) meta.push('due:' + S.val(c, 'deadline'));
+      const line = (head ? '- **' + t + '**' : '- [' + (S.val(c, 'done') ? 'x' : ' ') + '] ' + t) + (meta.length ? '  <!-- ' + meta.join(' ') + ' -->' : '');
+      if (d === 0 && p === S.ROOT) { out.push('', '# ' + (t || 'Untitled'), ''); walk(c, 0.5); continue; }
+      out.push('  '.repeat(Math.floor(d)) + line);
+      const n = S.val(c, 'notes');
+      if (n) out.push(...n.split('\n').map((l) => '  '.repeat(Math.floor(d) + 1) + '> ' + l));
+      walk(c, Math.floor(d) + 1);
+    }
+  };
+  walk(rootId, 0);
+  return out.join('\n').trim() + '\n';
 }

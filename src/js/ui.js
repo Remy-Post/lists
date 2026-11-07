@@ -431,7 +431,7 @@ let panels = null;
 const lazy = (name) => async (...a) => {
   if (!panels) {
     panels = await import('./panels.js');
-    panels.install({ S, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone });
+    panels.install({ S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone });
   }
   return ui[name](...a);
 };

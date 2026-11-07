@@ -35,14 +35,27 @@ export function open() {
   return dbp;
 }
 
+const PAGE = 2000;
+const breathe = () => (globalThis.scheduler && scheduler.yield ? scheduler.yield() : new Promise((r) => setTimeout(r, 0)));
+/** Everything on disk. Records arrive in pages of 2,000 with a yield between pages, so a very large
+    list never deserialises in one long task at boot (QA perf). */
 export async function loadAll() {
   const db = await open();
-  const tx = db.transaction(['nodes', 'meta'], 'readonly');
-  const nodes = req(tx.objectStore('nodes').getAll());
+  const tx = db.transaction('meta', 'readonly');
   const ms = tx.objectStore('meta');
   const [keys, vals] = await Promise.all([req(ms.getAllKeys()), req(ms.getAll())]);
   keys.forEach((k, i) => metaCache.set(k, vals[i]));
-  return { nodes: await nodes };
+  const nodes = [];
+  let after = null;
+  for (;;) {
+    const store = db.transaction('nodes', 'readonly').objectStore('nodes');
+    const page = await req(store.getAll(after == null ? null : IDBKeyRange.lowerBound(after, true), PAGE));
+    for (const r of page) nodes.push(r);
+    if (page.length < PAGE) break;
+    after = page[page.length - 1].id;
+    await breathe();
+  }
+  return { nodes };
 }
 
 /** Queue a record write. toOutbox: local edits that must reach the server. */
