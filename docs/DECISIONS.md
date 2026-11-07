@@ -25,9 +25,10 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 | SIGKILL 300 ms / 1 s after the last keystroke | 100% | 10/10, 10/10 |
 | Two-device sync convergence, cycle repair | identical trees | pass (22/22 checks) |
 | Rendering 500 rows (QA perf.mjs) | no long task > 50 ms, CPU ×1 | none (was 169 ms); only ~51 rows in the DOM (virtualized) |
+| **Typing on the real MacBook Pro M5** (Chrome 156, 120 Hz ProMotion, frame 8.4 ms; 51 real keystrokes) | keypress → painted frame ≤ 16 ms | **p50 9.1 · p95 12.6 · max 13.3 ms: pass** |
 | Typing, 2,000 items (QA perf.mjs) | key handler ≤ 16 ms | task p50 1.5 / p95 4.3 ms. Key→frame p95 22 ms against a blank-page floor of 15.8 ms on the same VM, so "≤ 16 ms key→frame" is restated as handler time |
-| 10k-item boot | ready ≤ 1.5 s | 342 ms at CPU ×1 (longest task 120 ms, was 515); 1.1 s at ×4 |
-| Edits on a 10k-item page | — | every edit type 50–58 ms at CPU ×4 (was 120–440); QA's script, which adds navigating away and back on 10k, peaks at 227 ms at ×4 |
+| 10k-item boot | ready ≤ 1.5 s | ready 1.0 s at CPU ×4; split into three tasks, longest 207 ms (was 495) |
+| Edits on a 10k-item page | — | every edit type 50–64 ms at CPU ×4 (was 120–440); QA's script, which adds navigating away and back on 10k, peaks at 170 ms at ×4 (was 404); 500-row page open 111 ms at ×4 (was 258) |
 | Flows / two-device sync / unit | all | 44/44 · 22/22 · 44/44 |
 | Contrast | all text ≥ 4.5:1 | 0 failures, both themes, both devices |
 | Server memory | ≤ 30 MB | 14.7 MiB |
@@ -46,7 +47,7 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 
 ## Known limits
 
-- **10k items at CPU ×4 on the 2-core ARM VM.** Edits are 50–58 ms. Boot (495 ms) and navigating away from and back to a 10k page (up to 227 ms) are whole-model rebuilds, about 55 ms at CPU ×1. Beating that needs incremental views across the whole model; deferred, since it's far beyond personal-list scale.
+- **10k items at CPU ×4 on the 2-core ARM VM.** Edits take 50–64 ms. Boot's longest task is 207 ms and opening a new page 111–170 ms. What's left is mostly the browser building and laying out the rows that fill the screen, close to the floor for showing a new page on this deliberately slowed box. On the real M5 Pro, typing measures 9–13 ms per keystroke.
 - **Typing key→frame p95 ≤ 16 ms is unreachable on this VM** (a blank page scores 16.6 ms p95), so the gate is the handler time: p95 4.5–5.9 ms.
 
 - Background tabs that are frozen (Page Lifecycle `frozen`) can't run IndexedDB writes. We flush on `visibilitychange: hidden`, which always comes first on real devices (QA: 100% survival).
