@@ -52,13 +52,20 @@ function hiddenDone(id) {
   return S.val(id, 'done') && (S.val(id, 'doneAt') || 0) < todayStart();
 }
 function outlineRows(root) {
-  const out = [];
+  // One pass, no per-level arrays from filter(), today's start computed once (was a new Date per row).
+  const out = [], ts = todayStart(), showDone = st.showDone;
   const walk = (p, d) => {
-    const list = S.children(p).filter((c) => S.val(c, 'kind') !== 'log' && !hiddenDone(c));
-    list.forEach((c, i) => {
+    const list = [];
+    for (const c of S.childrenAll(p)) {
+      if (!S.isLiveSelf(c) || S.val(c, 'kind') === 'log') continue;
+      if (!showDone && S.val(c, 'done') && (S.val(c, 'doneAt') || 0) < ts) continue;
+      list.push(c);
+    }
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
       out.push({ id: c, depth: d, parent: p, pos: i + 1, size: list.length });
       if (!st.collapsed.has(c) && S.hasChildren(c)) walk(c, d + 1);
-    });
+    }
   };
   walk(root, 0);
   return out;

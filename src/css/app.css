@@ -460,3 +460,5 @@ body:has(.lyr.sheet.in) .toast { bottom: auto; top: max(12px, env(safe-area-inse
 
 /* Long lists are virtualized in view.js: spacers stand in for rows far from the viewport. */
 .vspace { pointer-events: none; }
+/* A row's insides (depth, strike, condense) never ripple layout or style work into the rest of the page. */
+.row { contain: layout style; }
