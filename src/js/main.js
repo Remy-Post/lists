@@ -398,6 +398,13 @@ function registerSW() {
 }
 function doRegister() {
   navigator.serviceWorker.register('/sw.js').then((reg) => {
+    // Look for a new version now and whenever the app comes back to the foreground (at most every 30 min):
+    // an installed PWA can stay open for days, and the browser's own check isn't prompt (seen on the real Mac).
+    let lastCheck = Date.now();
+    reg.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastCheck > 30 * 60e3) { lastCheck = Date.now(); reg.update().catch(() => {}); }
+    });
     const onReady = (w) => w.addEventListener('statechange', () => {
       if (w.state === 'installed' && navigator.serviceWorker.controller) ui.toast('An update is ready', { action: { label: 'Reload', run: () => { w.postMessage('skip'); } }, ms: 10000 });
     });
