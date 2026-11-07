@@ -14,6 +14,9 @@ export const st = {
   touch: matchMedia('(pointer: coarse)').matches,
   reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
   saveData: !!(navigator.connection && navigator.connection.saveData),
+  // Weak hardware (≤ 2 cores or ≤ 2 GB): keep every interaction inside a frame by dropping effects that
+  // force per-frame layout. The strike still draws; only the type-condense animation snaps.
+  lowEnd: (navigator.hardwareConcurrency || 4) <= 2 || (!!navigator.deviceMemory && navigator.deviceMemory <= 2),
 };
 matchMedia('(pointer: coarse)').addEventListener?.('change', (e) => { st.touch = e.matches; });
 matchMedia('(prefers-reduced-motion: reduce)').addEventListener?.('change', (e) => { st.reduced = e.matches; });

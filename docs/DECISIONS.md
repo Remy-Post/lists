@@ -51,7 +51,7 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 
 ## Known limits
 
-- **10k items at CPU ×4 on the 2-core ARM VM** (roughly a budget phone). QA's own run still records a few tasks just over 50 ms (indents 53–84 ms, opening a 500-row page 59 ms), while an exact replica of its script records none. The work sits at the threshold. Everything at CPU ×1 passes with no long tasks, and the real M5 Pro types at 9–13 ms per keystroke.
+- **10k items at CPU ×4 on the 2-core ARM VM** (roughly a budget phone). QA's harness still records sporadic 50–85 ms tasks, with readings varying from run to run (97, 131, 84, 85 ms). Exact replicas of its script record none on most runs: with cursor, service worker, back-to-back timing and DPR 2, five runs recorded none and one recorded 51–68 ms. A traced run recorded none. The VM's load average was 2.26 on 2 cores during these runs, shared with n8n, MongoDB and the other sites, so contention decides the threshold. On ≤ 2-core or ≤ 2 GB devices the app now snaps the type-condense effect (the strike still draws) and builds pages in 6-row slices. Everything at CPU ×1 passes with no long tasks, and the real M5 Pro types at 9–13 ms per keystroke.
 - **Typing key→frame p95 ≤ 16 ms is unreachable on this VM** (a blank page scores 16.6 ms p95), so the gate is the handler time: p95 4.5–5.9 ms.
 
 - Background tabs that are frozen (Page Lifecycle `frozen`) can't run IndexedDB writes. We flush on `visibilitychange: hidden`, which always comes first on real devices (QA: 100% survival).

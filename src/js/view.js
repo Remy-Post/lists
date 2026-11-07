@@ -289,7 +289,7 @@ function flushStrikes() {
     paintStrike(tl, geo, id, anim && !st.reduced ? (fast ? 'fast' : 'full') : false);
     if (anim) {
       el._tx.style.transition = '';
-      if (!st.reduced && !fast) el._tx.animate([{ fontStretch: '100%' }, { fontStretch: '88%' }], { duration: 200, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
+      if (!st.reduced && !fast && !st.lowEnd) el._tx.animate([{ fontStretch: '100%' }, { fontStretch: '88%' }], { duration: 200, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
     }
   }
 }
@@ -405,7 +405,7 @@ function renderWindow([a, b]) {
 }
 // A freshly opened long page builds progressively: a first slice now, then a slice per frame, so no single
 // task has to style and lay out a whole screen of new rows on a slow device (QA perf, CPU ×4).
-const SLICE = 12;
+const SLICE = st.lowEnd ? 6 : 12;
 let growJob = 0;
 export function renderPage(opts = {}) {
   const r = st.route;
