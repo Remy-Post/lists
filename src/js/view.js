@@ -29,6 +29,24 @@ const hcache = new Map();
 const topSp = h('div', { class: 'vspace', 'aria-hidden': 'true' });
 const botSp = h('div', { class: 'vspace', 'aria-hidden': 'true' });
 const virtual = () => items.length > VIRT;
+/* Geometry is read only after layout, never in the middle of a render (round 11: each slow-CPU indent frame
+   forced two or three synchronous layouts). A ResizeObserver reports rendered row heights after the frame's
+   layout; the spacers depend only on rows outside the window, so they never wait for it. The outline's
+   position and the scroll offset are cached from the same callback and from the scroll handler. */
+let outY = null, sy = 0, rowHKnown = false;
+const readRowH = () => { rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 36; rowHKnown = true; };
+function readGeo() { const o = $('#outline'); if (!o) return; sy = scrollY; outY = o.getBoundingClientRect().top + sy; }
+const sizer = new ResizeObserver((entries) => {
+  let changed = false;
+  for (const e of entries) {
+    const el = e.target, k = el._key;
+    if (k == null || els.get(k) !== el) continue;
+    const v = e.borderBoxSize?.[0]?.blockSize ?? el.offsetHeight;
+    if (v && hcache.get(k) !== v) { hcache.set(k, v); changed = true; }
+  }
+  readRowH(); readGeo(); // layout is clean here, so these reads are free
+  if (changed && virtual()) computeOffsets();
+});
 /** The row's element if it is rendered (never renders anything). */
 export const peekRow = (id) => els.get(id);
 /** The row's element, rendering the rows around it first if it is outside the window. */
@@ -158,10 +176,17 @@ function makeRow(id) {
 
 /** Everything a row's appearance depends on; if unchanged, the DOM is already right. */
 function sigOf(id, m, smart) {
-  return S.rev(id) + '|' + (m.date || '') + '|' + (m.pos || 0) + '/' + (m.size || 0) + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
+  return S.rev(id) + '|' + (m.date || '') + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
     (st.collapsed.has(id) ? 1 : 0) + (st.sel.has(id) ? 1 : 0) + (st.cursor === id ? 1 : 0) + '|' + (S.hasChildren(id) ? S.countOpen(id) : -1) + '|' + (smart ? S.ancestors(id).map((a) => S.rev(a) + S.val(a, 'title')).join() : '') + '|' + (st.rows[0] === id ? 1 : 0);
 }
 export function fillRow(el, id, m, smart) {
+  // Position in the set changes for every sibling when one row moves; it is two attributes, not a refill
+  // (round 11: an indent refilled and re-struck every visible sibling).
+  const ps = m.pos ? m.pos + '/' + m.size : '';
+  if (el._ps !== ps) {
+    el._ps = ps;
+    if (m.pos) { el.setAttribute('aria-posinset', m.pos); el.setAttribute('aria-setsize', m.size); } else { el.removeAttribute('aria-posinset'); el.removeAttribute('aria-setsize'); }
+  }
   const sig = sigOf(id, m, smart);
   if (el._sig === sig && document.activeElement !== el._tx) return;
   el._sig = sig;
@@ -181,7 +206,6 @@ export function fillRow(el, id, m, smart) {
   el.classList.toggle('smart', !!smart);
   el.classList.toggle('log', S.val(id, 'kind') === 'log');
   el.setAttribute('aria-level', (m.depth || 0) + 1);
-  if (m.pos) { el.setAttribute('aria-posinset', m.pos); el.setAttribute('aria-setsize', m.size); }
   if (kidsN && !smart) el.setAttribute('aria-expanded', String(!collapsed)); else el.removeAttribute('aria-expanded');
   el.setAttribute('aria-selected', String(st.sel.has(id)));
   el.tabIndex = st.cursor === id ? 0 : -1;
@@ -266,7 +290,7 @@ addEventListener('scroll', () => {
     scrollRaf = 0;
     if (virtual()) {
       if (growJob) { cancelAnimationFrame(growJob); growJob = 0; }
-      const r = withCursor(viewWindow());
+      const r = withCursor(viewWindow(true)); // a scroll frame starts with clean layout, so reading is free
       // Re-render only when the needed range isn't already covered (or the window grew needlessly large).
       if (r[0] < win[0] || r[1] > win[1] || win[1] - win[0] > (r[1] - r[0]) * 3) renderWindow(r);
     }
@@ -300,8 +324,28 @@ function flushStrikes() {
     }
   }
 }
-let strikeRaf = 0;
-export function queueStrikes() { if (!strikeRaf) strikeRaf = requestAnimationFrame(() => { strikeRaf = 0; flushStrikes(); }); }
+// Post-layout work (strikes, deferred focus) runs after the frame's layout: observing a sentinel always
+// reports once, in the same frame, after layout and after the sizer (observers report in creation order).
+// A two-frame rAF fallback covers a frame that never reports.
+let armed = false, strikeQ = false, postGen = 0;
+const postQ = [];
+const tick = document.createElement('i');
+function runPost() {
+  if (!armed) return;
+  armed = false; post.unobserve(tick);
+  if (strikeQ) { strikeQ = false; flushStrikes(); }
+  for (const f of postQ.splice(0)) { try { f(); } catch (e) { console.error(e); } }
+}
+const post = new ResizeObserver(runPost);
+function arm() {
+  if (armed) return;
+  armed = true; post.observe(tick);
+  const g = ++postGen;
+  requestAnimationFrame(() => requestAnimationFrame(() => { if (armed && g === postGen) runPost(); }));
+}
+export function queueStrikes() { strikeQ = true; arm(); }
+/** Run fn after this frame's layout, when reading geometry or moving focus forces nothing. */
+export function afterLayout(fn) { postQ.push(fn); arm(); }
 let lastW = 0;
 new ResizeObserver((e) => {
   const w = Math.round(e[0].contentRect.width);
@@ -362,10 +406,11 @@ function computeOffsets() {
   }
 }
 /** Item range covering the viewport plus overscan, in outline coordinates. */
-function viewWindow() {
+function viewWindow(live) {
   const n = items.length;
   if (!virtual()) return [0, n];
-  const top = -$('#outline').getBoundingClientRect().top;
+  if (live || outY == null) readGeo();
+  const top = sy - outY;
   const lo = top - OVERSCAN, hi = top + innerHeight + OVERSCAN;
   let a = 0, b = n;
   while (a < b) { const m = (a + b) >> 1; if (offs[m + 1] <= lo) a = m + 1; else b = m; }
@@ -388,10 +433,10 @@ function renderWindow([a, b]) {
     const it = items[i];
     let el = els.get(it.key);
     if (it.grp) {
-      if (!el) { el = h('div', { class: 'grp', role: 'presentation' }); els.set(it.key, el); }
+      if (!el) { el = h('div', { class: 'grp', role: 'presentation' }); el._key = it.key; els.set(it.key, el); }
       if (el._h !== it.lab) { el.innerHTML = it.lab; el._h = it.lab; }
     } else {
-      if (!el) { el = makeRow(it.id); els.set(it.key, el); }
+      if (!el) { el = makeRow(it.id); el._key = it.key; els.set(it.key, el); }
       fillRow(el, it.id, it.m, it.smart);
       el.classList.toggle('ghosted', !!(st.ghost && st.ghost.has(it.id))); // rows rendered mid-drag stay faded (v-3)
     }
@@ -399,21 +444,18 @@ function renderWindow([a, b]) {
     nodes.push(el);
   }
   if (virtual()) nodes.push(botSp);
-  for (const k of [...els.keys()]) if (!keep.has(k)) els.delete(k);
+  for (const [k, el] of els) if (!keep.has(k)) { els.delete(k); if (el._ro) { sizer.unobserve(el); el._ro = false; } }
   reconcile(box, nodes);
   if (!virtual()) return;
-  // Measure what is rendered (one read), then correct the cached heights and the spacers (writes).
-  const hs = [];
-  for (let i = a; i < b; i++) { const el = els.get(items[i].key); hs.push(el ? el.offsetHeight : 0); }
-  let changed = false;
-  for (let i = a; i < b; i++) { const v = hs[i - a]; if (v && hcache.get(items[i].key) !== v) { hcache.set(items[i].key, v); changed = true; } }
-  if (changed) computeOffsets();
+  // Heights of the rows just rendered arrive in the sizer callback, after layout. The spacers are sums of
+  // rows outside [a, b), so they are already right.
+  for (let i = a; i < b; i++) { const el = els.get(items[i].key); if (el && !el._ro) { sizer.observe(el); el._ro = true; } }
   topSp.style.height = offs[a] + 'px';
   botSp.style.height = (offs[items.length] - offs[b]) + 'px';
 }
 // A freshly opened long page builds progressively: a first slice now, then a slice per frame, so no single
 // task has to style and lay out a whole screen of new rows on a slow device (QA perf, CPU ×4).
-const SLICE = st.lowEnd ? 6 : 12;
+const SLICE = st.lowEnd ? 4 : 12;
 let growJob = 0;
 export function renderPage(opts = {}) {
   const r = st.route;
@@ -421,10 +463,10 @@ export function renderPage(opts = {}) {
   const box = $('#outline');
   if (growJob) { cancelAnimationFrame(growJob); growJob = 0; }
   const fresh = key !== pageKey;
-  if (fresh) { els.clear(); hcache.clear(); box.replaceChildren(); pageKey = key; }
+  if (fresh) { els.clear(); hcache.clear(); sizer.disconnect(); box.replaceChildren(); pageKey = key; sy = 0; } // show() scrolls a new page to the top
   const before = opts.flip ? measure() : new Map();
   const active = document.activeElement;
-  rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 36;
+  if (!rowHKnown) readRowH();
   // A non-structural edit on an outline page (completing, renaming, dating) can't change which rows show:
   // today's completions stay in place. Reuse the row model instead of rebuilding all of it.
   const outline = r.view === 'node' || r.view === 'inbox';
@@ -465,7 +507,8 @@ export function renderPage(opts = {}) {
       queueStrikes();
       if (end < full[1]) growJob = requestAnimationFrame(grow);
     };
-    growJob = requestAnimationFrame(grow);
+    // The first slice gets a frame to itself: a rAF requested now would run before this frame's layout.
+    growJob = requestAnimationFrame(() => { growJob = requestAnimationFrame(grow); });
   } else renderWindow(full);
   // Roving tabindex: exactly one row is a Tab stop (the cursor, else the first row).
   const stopId = st.cursor && index.has(st.cursor) ? st.cursor : st.rows[0];
@@ -484,56 +527,67 @@ function renderHead() {
   const title = $('#ptitle'), sub = $('#psub'), crumbs = $('#crumbs'), pn = $('#pnotes'), stack = $('#stack');
   const names = { inbox: 'Inbox', today: 'Today', upcoming: 'Upcoming', someday: 'Someday', logbook: 'Logbook', trash: 'Trash' };
   let depth = 0;
-  crumbs.replaceChildren();
-  if (r.view === 'node') {
-    const anc = S.ancestors(r.id);
-    depth = anc.length + 1;
-    for (const a of anc) crumbs.append(h('a', { href: '#/' + (a === S.INBOX ? 'inbox' : 'n/' + a), class: 'crumb' }, a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled'));
-    const t = S.val(r.id, 'title');
-    if (document.activeElement !== title) title.textContent = t;
-    title.contentEditable = CE;
-    title.dataset.ph = 'Untitled';
-    const n = S.val(r.id, 'notes');
-    if (document.activeElement !== pn) pn.textContent = n;
-    pn.hidden = false; pn.contentEditable = CE;
-    const open = S.countOpen(r.id);
-    sub.textContent = open ? `${open} open` : S.hasChildren(r.id) ? 'All done' : '';
-  } else {
-    title.textContent = names[r.view] || '';
-    title.contentEditable = 'false';
-    pn.hidden = true;
-    if (r.view === 'today') sub.textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-    else if (r.view === 'inbox') { const n = S.countOpen(S.INBOX); sub.textContent = n ? `${n} open` : ''; }
-    else sub.textContent = '';
+  // Every write is guarded: the header is re-rendered with the page, and equal writes still dirty layout.
+  const ce = (el, v) => { if (el.contentEditable !== v) el.contentEditable = v; };
+  const anc = r.view === 'node' ? S.ancestors(r.id) : [];
+  const ck = anc.map((a) => a + '\u0001' + (a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled')).join('\u0002');
+  if (crumbs._k !== ck) {
+    crumbs._k = ck;
+    crumbs.replaceChildren(...anc.map((a) => h('a', { href: '#/' + (a === S.INBOX ? 'inbox' : 'n/' + a), class: 'crumb' }, a === S.INBOX ? 'Inbox' : S.val(a, 'title') || 'Untitled')));
   }
-  document.title = (r.view === 'node' ? S.val(r.id, 'title') || 'Untitled' : names[r.view]) + ' — Lists';
+  if (r.view === 'node') {
+    depth = anc.length + 1;
+    if (document.activeElement !== title) setText(title, S.val(r.id, 'title') || '');
+    ce(title, CE);
+    if (title.dataset.ph !== 'Untitled') title.dataset.ph = 'Untitled';
+    if (document.activeElement !== pn) setText(pn, S.val(r.id, 'notes') || '');
+    if (pn.hidden) pn.hidden = false;
+    ce(pn, CE);
+    const open = S.countOpen(r.id);
+    setText(sub, open ? `${open} open` : S.hasChildren(r.id) ? 'All done' : '');
+  } else {
+    setText(title, names[r.view] || '');
+    ce(title, 'false');
+    if (!pn.hidden) pn.hidden = true;
+    if (r.view === 'today') setText(sub, new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }));
+    else if (r.view === 'inbox') { const n = S.countOpen(S.INBOX); setText(sub, n ? `${n} open` : ''); }
+    else setText(sub, '');
+  }
+  const dt = (r.view === 'node' ? S.val(r.id, 'title') || 'Untitled' : names[r.view]) + ' — Lists';
+  if (document.title !== dt) document.title = dt;
   // Paper stack: one sheet edge per level of depth.
   const n = Math.min(depth, 6);
   if (stack.childElementCount !== n) stack.replaceChildren(...Array.from({ length: n }, () => h('i')));
-  stack.dataset.more = depth > 6 ? String(depth) : '';
+  const more = depth > 6 ? String(depth) : '';
+  if (stack.dataset.more !== more) stack.dataset.more = more;
   // Only write when changed: body attributes feed selectors, and every write restyles every row (QA 10k perf).
   if (document.body.dataset.view !== r.view) document.body.dataset.view = r.view;
   if (document.body.dataset.depth !== String(depth)) document.body.dataset.depth = String(depth);
 }
 
+// The empty state is rebuilt only when what it says changes (it used to be rebuilt on every render).
+function showEmpty(e, key, hidden, cls, ...kids) {
+  if (e._k === key) return;
+  e._k = key;
+  e.replaceChildren(...kids.filter(Boolean));
+  e.className = cls;
+  e.hidden = hidden;
+}
 function renderEmpty() {
   const e = $('#empty');
   const v = st.route.view;
-  e.replaceChildren();
-  e.className = 'empty';
-  e.hidden = st.rows.length > 0;
   if (v === 'today') {
     const doneToday = S.qDoneToday(todayStart());
     const open = S.qToday(today());
     if (!open.day.length && !open.eve.length && doneToday.length) {
       // "Today, struck through": handled by main (needs the light); here only the words.
-      e.hidden = false;
-      e.className = 'empty clear';
-      e.append(h('p', { class: 'big' }, 'Today is clear.'), h('p', { class: 'cnt' }, `${doneToday.length} done`));
+      const n = `${doneToday.length} done`;
+      if (e._k !== 'clear:' + n) showEmpty(e, 'clear:' + n, false, 'empty clear', h('p', { class: 'big' }, 'Today is clear.'), h('p', { class: 'cnt' }, n));
       return;
     }
   }
-  if (!e.hidden) {
+  if (st.rows.length > 0) { showEmpty(e, 'hidden', true, 'empty'); return; }
+  {
     const key = st.touch ? 'Tap + to add one.' : 'Press Q to add one, or Enter to start typing.';
     const msg = {
       inbox: ['Inbox is empty.', key],
@@ -544,12 +598,19 @@ function renderEmpty() {
       trash: ['Trash is empty.', ''],
       node: ['Empty.', key],
     }[v] || ['', ''];
-    e.append(h('p', { class: 'big' }, msg[0]), msg[1] ? h('p', null, msg[1]) : null);
+    showEmpty(e, v + ':' + msg.join('|'), false, 'empty', h('p', { class: 'big' }, msg[0]), msg[1] ? h('p', null, msg[1]) : null);
   }
 }
 
 /* ---------------- sidebar ---------------- */
 let badgeJob = 0, lastTodayN = 0;
+// Sidebar writes only what changed: rewriting equal text still dirties layout for every list, every render.
+const setText = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
+const setOn = (el, on) => {
+  if (el.classList.contains('on') === on) return;
+  el.classList.toggle('on', on);
+  if (on) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+};
 export function renderSide() {
   const t = today();
   // The Today badge needs a pass over every open item; it updates in idle time so an edit never waits on it.
@@ -557,16 +618,13 @@ export function renderSide() {
   if (!badgeJob) badgeJob = (window.requestIdleCallback || setTimeout)(() => {
     badgeJob = 0;
     lastTodayN = S.qTodayCount(today());
-    const n = document.querySelector('[data-nav="today"] .n');
-    if (n) n.textContent = lastTodayN ? String(lastTodayN) : '';
+    setText(document.querySelector('[data-nav="today"] .n'), lastTodayN ? String(lastTodayN) : '');
   }, { timeout: 300 });
   for (const b of document.querySelectorAll('[data-nav]')) {
     const v = b.dataset.nav;
     const on = st.route.view === v || (v === 'inbox' && st.route.view === 'node' && S.ancestors(st.route.id)[0] === S.INBOX);
-    b.classList.toggle('on', on);
-    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
-    const c = b.querySelector('.n');
-    if (c) c.textContent = counts[v] ? String(counts[v]) : '';
+    setOn(b, on);
+    setText(b.querySelector('.n'), counts[v] ? String(counts[v]) : '');
   }
   const box = $('#sideLists');
   const lists = S.children(S.ROOT).filter((id) => id !== S.INBOX);
@@ -574,11 +632,10 @@ export function renderSide() {
   const items = lists.map((id) => {
     let b = box.querySelector(`[data-list="${CSS.escape(id)}"]`);
     if (!b) b = h('a', { class: 'li', 'data-list': id, href: '#/n/' + id }, h('span', { class: 'lt' }), h('span', { class: 'n' }));
-    b.querySelector('.lt').textContent = S.val(id, 'title') || 'Untitled';
+    setText(b.querySelector('.lt'), S.val(id, 'title') || 'Untitled');
     const n = S.countOpen(id);
-    b.querySelector('.n').textContent = n ? String(n) : '';
-    b.classList.toggle('on', top === id);
-    if (top === id) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    setText(b.querySelector('.n'), n ? String(n) : '');
+    setOn(b, top === id);
     return b;
   });
   reconcile(box, items);

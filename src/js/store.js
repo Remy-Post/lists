@@ -129,7 +129,8 @@ function changed(id, structural, fields, move) {
     const t = memo.get('tree');
     for (const k of [...memo.keys()]) if (k !== 'tree') memo.delete(k);
     if (t && (fields.includes('done') || fields.includes('heading')) && !treeDelta(t, id)) memo.delete('tree');
-    else if (t && (fields.includes('when') || fields.includes('deadline'))) { const r = recs.get(id); if (r && (fv(r, 'when') || fv(r, 'deadline'))) t.dated.add(id); else t.dated.delete(id); }
+    // Not an else: one patch can complete an item and move its date (a repeat rolling forward).
+    if (memo.has('tree') && (fields.includes('when') || fields.includes('deadline'))) { const r = recs.get(id); if (r && (fv(r, 'when') || fv(r, 'deadline'))) t.dated.add(id); else t.dated.delete(id); if (t.dueDay) redue(t, id); }
   }
   if (structural) pendingStructural = true;
   (pending ||= new Set()).add(id);
@@ -305,6 +306,21 @@ const bump = (t, start, d) => {
     if (a === ROOT || (ar && fv(ar, 'kind') === 'log')) break;
   }
 };
+/* Today's membership (open items dated on or before t.dueDay) is kept on the cached walk too, so a
+   completion or an indent doesn't rescan every dated item (round 11: 13–34 ms per edit at CPU ×4). */
+const dueOn = (r, day) => { const w = fv(r, 'when'), dl = fv(r, 'deadline'); return (w && w <= day) || (dl && dl <= day); };
+function redue(t, id) {
+  const r = recs.get(id);
+  if (r && t.items.has(id) && t.dated.has(id) && dueOn(r, t.dueDay)) t.due.add(id); else t.due.delete(id);
+}
+function dueSet(day) {
+  const t = treeStats();
+  if (t.dueDay !== day) {
+    t.due = new Set(); t.dueDay = day;
+    for (const id of t.dated) if (t.items.has(id) && dueOn(recs.get(id), day)) t.due.add(id);
+  }
+  return t.due;
+}
 /** Re-derive open-item membership for `id`'s subtree from its current ancestors. */
 function resubtree(t, id) {
   let doneAbove = false;
@@ -314,6 +330,7 @@ function resubtree(t, id) {
     if (!rr || fv(rr, 'deleted')) return;
     const d = da || fv(rr, 'done');
     if (!d && !fv(rr, 'heading') && fv(rr, 'kind') === 'item') t.items.add(c); else t.items.delete(c);
+    if (t.dueDay && t.dated.has(c)) redue(t, c);
     const arr = kids.get(c);
     if (arr) for (let i = 0; i < arr.length; i++) visit(arr[i], d);
   };
@@ -411,13 +428,7 @@ export function order() {
   });
 }
 /** Today's open count without sorting (the sidebar badge needs only the number). */
-export function qTodayCount(today) {
-  return memoize('todayN:' + today, () => {
-    let n = 0;
-    for (const id of datedOpen()) { const r = recs.get(id), w = fv(r, 'when'), dl = fv(r, 'deadline'); if ((w && w <= today) || (dl && dl <= today)) n++; }
-    return n;
-  });
-}
+export function qTodayCount(today) { return dueSet(today).size; }
 const byOrder = (a, b) => (order().get(a) ?? 0) - (order().get(b) ?? 0);
 /** Sort ids into document order. Small sets compare root-to-node sibling-index paths (a few lookups each)
     instead of walking the whole tree; big sets use the cached full order. */
@@ -444,10 +455,7 @@ function* datedOpen() { const t = treeStats(); for (const id of t.dated) if (t.i
 export function qToday(today) { return memoize('today:' + today, () => qTodayRaw(today)); }
 function qTodayRaw(today) {
   const day = [], eve = [];
-  for (const id of datedOpen()) {
-    const r = recs.get(id), w = fv(r, 'when'), dl = fv(r, 'deadline');
-    if ((w && w <= today) || (dl && dl <= today)) (fv(r, 'evening') && w && w <= today ? eve : day).push(id);
-  }
+  for (const id of dueSet(today)) { const r = recs.get(id), w = fv(r, 'when'); (fv(r, 'evening') && w && w <= today ? eve : day).push(id); }
   sortByOrder(day); sortByOrder(eve);
   return { day, eve };
 }

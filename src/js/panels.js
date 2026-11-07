@@ -4,7 +4,7 @@
 let S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone;
 export function install(d) {
   ({ S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone } = d);
-  wire(); wirePair();
+  wire(); wirePair(); wireVault();
   // Panel styles live in their own lazy stylesheet; wait for it so nothing opens unstyled.
   if (typeof PANELS_CSS !== 'string' || document.querySelector('link[data-panels]')) return Promise.resolve();
   return new Promise((res) => {
@@ -13,6 +13,35 @@ export function install(d) {
     l.onload = l.onerror = () => res();
     document.head.append(l);
   });
+}
+/* ---------------- backup: turn on, pair, turn off (main.js keeps only the gate and the status) ---------------- */
+function wireVault() {
+  ui.createVault = async () => { const s = await ui.loadSync(); await ui.requeueAll(); const c = await s.createVault(); await s.syncNow().catch(() => {}); return c; };
+  ui.join = async (code) => {
+    const s = await ui.loadSync();
+    dropUntouchedTour();
+    await ui.requeueAll();
+    await s.join(code.trim());
+    await s.syncNow();
+  };
+  ui.unpair = async () => { const s = await ui.loadSync(); await s.unpair(); await ui.requeueAll(); };
+  ui.pairLink = async (code) => {
+    const clear = () => { try { sessionStorage.removeItem('lists.pair'); } catch {} };
+    if (await ui.pairingCode()) { ui.toast('This device is already paired'); clear(); return; }
+    // Never auto-join: a link could come from someone else, and joining uploads this device's lists (security-1).
+    const ok = await ui.confirmPair(code);
+    if (!ok) { clear(); return; }
+    try { await ui.join(code); ui.toast('Paired. Your lists are syncing.'); } catch { ui.toast('That pairing link didn’t work'); }
+    clear();
+  };
+}
+/** A device being paired shouldn't push its untouched tour into the account (audit S2-9). */
+function dropUntouchedTour() {
+  const tour = new Set(DB.getMeta('tourIds') || []);
+  if (!tour.size) return;
+  const others = [...S.recs.keys()].filter((id) => id !== S.ROOT && id !== S.INBOX && !tour.has(id) && S.isLive(id));
+  if (others.length) return;
+  for (const id of tour) if (S.recs.has(id)) S.patch(id, { deleted: 'void' });
 }
 function wire() {
 /* ---------------- cheat sheet ---------------- */

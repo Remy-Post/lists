@@ -40,9 +40,11 @@ for (const sd of [7, 42, 1234]) test(`incremental counts and open items equal a 
   for (let step = 0; step < 600; step++) {
     const id = ids[1 + Math.floor(rnd() * (ids.length - 1))];
     const r = rnd();
-    if (r < 0.6) S.patch(id, { done: !S.val(id, 'done'), doneAt: Date.now() });
-    else if (r < 0.75) S.patch(id, { heading: !S.val(id, 'heading') });
-    else if (r < 0.8) S.patch(id, { when: rnd() < 0.5 ? today : null });
+    if (r < 0.45) S.patch(id, { done: !S.val(id, 'done'), doneAt: Date.now() });
+    else if (r < 0.55) S.patch(id, { heading: !S.val(id, 'heading') });
+    else if (r < 0.67) S.patch(id, { when: rnd() < 0.5 ? today : rnd() < 0.5 ? null : '2026-11-08' });
+    else if (r < 0.72) S.patch(id, { deadline: rnd() < 0.5 ? today : null });
+    else if (r < 0.8) S.patch(id, { done: !S.val(id, 'done'), doneAt: Date.now(), when: rnd() < 0.5 ? today : '2026-11-09' }); // a repeat rolling forward
     else if (r < 0.92) {
       // move: indent-like or to a random valid parent
       const np = ids[Math.floor(rnd() * ids.length)];
@@ -51,9 +53,14 @@ for (const sd of [7, 42, 1234]) test(`incremental counts and open items equal a 
     else S.patch(id, { title: 'x' + step });
     const b = brute();
     for (const n of [S.ROOT, ...ids]) assert.equal(S.countOpen(n), b.open.get(n) || 0, `open count of ${n} after step ${step}`);
+    if (step % 7 === 0) { // another day's query re-derives the cached membership; today's must still be right after
+      const d2 = '2026-11-08', exp2 = [...b.items].filter((x) => (S.val(x, 'when') && S.val(x, 'when') <= d2) || (S.val(x, 'deadline') && S.val(x, 'deadline') <= d2));
+      assert.equal(S.qTodayCount(d2), exp2.length, `Today count for ${d2} after step ${step}`);
+    }
     const t = S.qToday(today);
-    const expectToday = [...b.items].filter((x) => S.val(x, 'when') && S.val(x, 'when') <= today).sort();
+    const expectToday = [...b.items].filter((x) => (S.val(x, 'when') && S.val(x, 'when') <= today) || (S.val(x, 'deadline') && S.val(x, 'deadline') <= today)).sort();
     assert.deepEqual([...t.day, ...t.eve].sort(), expectToday, `Today after step ${step}`);
+    assert.equal(S.qTodayCount(today), expectToday.length, `Today count after step ${step}`);
     const dfs = []; const walkO = (p) => { for (const c of S.children(p)) { dfs.push(c); walkO(c); } }; walkO(S.ROOT);
     const exp = dfs.filter((x) => t.day.includes(x));
     assert.deepEqual(t.day, exp, `Today order after step ${step}`);

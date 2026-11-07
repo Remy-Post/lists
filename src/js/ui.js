@@ -435,7 +435,7 @@ const lazy = (name) => async (...a) => {
   }
   return ui[name](...a);
 };
-for (const n of ['cheat', 'settings', 'exportMd', 'exportJson', 'importFile', 'confirmPair']) ui[n] = lazy(n);
+for (const n of ['cheat', 'settings', 'exportMd', 'exportJson', 'importFile', 'confirmPair', 'createVault', 'join', 'unpair', 'pairLink']) ui[n] = lazy(n);
 
 /* ---------------- theme ---------------- */
 ui.setTheme = (v) => {

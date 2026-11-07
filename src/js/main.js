@@ -4,7 +4,7 @@ import * as O from './ops.js';
 import * as A from './actions.js';
 import * as DB from './db.js';
 import { st, $, MOD } from './state.js';
-import { renderPage, renderSide, rowEl, peekRow, transition, dayChanged, refillRow } from './view.js';
+import { renderPage, renderSide, rowEl, peekRow, transition, dayChanged, refillRow, afterLayout } from './view.js';
 import { wire, focusRow } from './input.js';
 import { wireKeys } from './keys.js';
 import { wireGestures } from './gesture.js';
@@ -92,8 +92,13 @@ function show(r, kind, fromRow) {
     checkCleared(); // opening Today when it's already clear shows the cleared page (seen on the real Mac)
     // Land keyboard focus in the new page, including after a mouse click in the sidebar or a palette jump,
     // so single-key shortcuts keep working (a11y-09, review interaction-2). Then announce what rendered.
-    const a = document.activeElement, m = $('#main');
-    if (!st.touch && m && (!a || a === document.body || !a.isConnected || a.closest('#side, .topbar, #searchBtn, #moreBtn'))) m.focus({ preventScroll: true });
+    // After layout: focus() needs clean style, and forcing it here restyled the whole new page inside the
+    // navigation task (round 11, the slow-CPU Today switch).
+    const route = st.route;
+    afterLayout(() => {
+      const a = document.activeElement, m = $('#main');
+      if (st.route === route && !st.touch && m && (!a || a === document.body || !a.isConnected || a.closest('#side, .topbar, #searchBtn, #moreBtn'))) m.focus({ preventScroll: true });
+    });
     announce(r);
   };
   if (same) { doRender(); return; }
@@ -118,9 +123,12 @@ function show(r, kind, fromRow) {
   setTimeout(() => { pt.style.viewTransitionName = ''; }, 700);
   closeDrawer(); // no-op when closed; also covers a narrow window driven by a mouse (review platform-6)
 }
+// The address bar follows in a task of its own: pushState costs several ms of history bookkeeping that the
+// navigation frame doesn't need to wait for (round 11, the slow-CPU Today switch).
+let urlJob = 0, urlWant = '';
 ui.go = (r, kind = 'pointer', fromRow) => {
-  const target = hashOf(r);
-  if (location.hash !== target) history.pushState(null, '', target);
+  urlWant = hashOf(r);
+  if (!urlJob) urlJob = setTimeout(() => { urlJob = 0; if (location.hash !== urlWant) history.pushState(null, '', urlWant); }, 0);
   show(r, kind, fromRow);
 };
 ui.focus = (id) => focusRow(id);
@@ -173,36 +181,14 @@ ui.syncNow = async () => {
   ui.toast(ok ? 'Synced' : navigator.onLine ? 'Sync failed. It will retry on a good connection.' : 'You’re offline. Changes are saved here and will sync later.');
 };
 const requeueAll = () => DB.requeueAll([...S.recs.keys()].filter((id) => id !== S.ROOT));
-ui.createVault = async () => { await loadSync(); await requeueAll(); const c = await sync.createVault(); await sync.syncNow().catch(() => {}); return c; };
-ui.join = async (code) => {
-  await loadSync();
-  dropUntouchedTour();
-  await requeueAll();
-  await sync.join(code.trim());
-  await sync.syncNow();
-};
-ui.unpair = async () => { await loadSync(); await sync.unpair(); await requeueAll(); };
-/** A device being paired shouldn't push its untouched tour into the account (audit S2-9). */
-function dropUntouchedTour() {
-  const tour = new Set(DB.getMeta('tourIds') || []);
-  if (!tour.size) return;
-  const others = [...S.recs.keys()].filter((id) => id !== S.ROOT && id !== S.INBOX && !tour.has(id) && S.isLive(id));
-  if (others.length) return;
-  for (const id of tour) if (S.recs.has(id)) S.patch(id, { deleted: 'void' });
-}
+ui.loadSync = loadSync; ui.requeueAll = requeueAll; // turning backup on, pairing and unpairing live in panels.js
 ui.pairingCode = async () => (isPaired() ? (await loadSync()).pairingCode() : null);
-async function pairFromLink(code) {
+function pairFromLink(code) {
   history.replaceState(null, '', '#/today'); // the key must not linger in history
   try { sessionStorage.setItem('lists.pair', code); } catch {} // survives a reload until join resolves
   show({ view: 'today' }, 'key');
-  if (await ui.pairingCode()) { ui.toast('This device is already paired'); clearPending(); return; }
-  // Never auto-join: a link could come from someone else, and joining uploads this device's lists (security-1).
-  const ok = await ui.confirmPair(code);
-  if (!ok) { clearPending(); return; }
-  try { await ui.join(code); ui.toast('Paired. Your lists are syncing.'); } catch { ui.toast('That pairing link didn’t work'); }
-  clearPending();
+  ui.pairLink(code); // the rest (confirm, join) is in panels.js
 }
-const clearPending = () => { try { sessionStorage.removeItem('lists.pair'); } catch {} };
 const pendingPair = () => { try { return sessionStorage.getItem('lists.pair'); } catch { return null; } };
 const maybeSync = (why) => {
   try {
