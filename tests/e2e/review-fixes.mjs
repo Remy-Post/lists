@@ -119,6 +119,15 @@ async function page(vp = { width: 1500, height: 900 }, extra = {}) {
   check('Markdown export → import round-trips lists, nesting, notes, dates, headings, empty lists', ok, JSON.stringify(r));
   await ctx.close();
 }
+{ // real-device finding (Mac): Today already clear on load shows the cleared page, not struck rows + headline
+  const { ctx, p } = await page();
+  await p.evaluate(() => { const { S, A } = window.__lists; const t = S.qToday(A.today()); A.toggleDone([...t.day, ...t.eve]); });
+  await p.waitForTimeout(300); await p.evaluate(() => window.__lists.DB.flush()); await p.reload();
+  await p.waitForFunction(() => window.__lists && document.body.classList.contains('ready')); await p.waitForTimeout(300);
+  const r = await p.evaluate(() => ({ cleared: document.body.classList.contains('cleared'), ckVisible: getComputedStyle(document.querySelector('.row .ck')).opacity }));
+  check('Mac: opening an already-clear Today shows the cleared page', r.cleared && r.ckVisible === '0', JSON.stringify(r));
+  await ctx.close();
+}
 // ---- virtualization (600 rows): focus survives the sliding window (v-1), off-window anchors (v-2), drag (v-3)
 async function bigList(p, n = 600) {
   return p.evaluate((n) => { const { A, O, S, ui } = window.__lists; let l; O.tx('fx', () => { l = A.newList('Big'); for (let i = 0; i < n; i++) O.create({ title: 'r' + i, pos: S.posAt(l, i) }); }); ui.go({ view: 'node', id: l }, 'key'); return l; }, n);

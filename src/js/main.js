@@ -86,6 +86,7 @@ function show(r, kind, fromRow) {
   const shallower = !deeper && prev.view === 'node' && r.view === 'node' && S.ancestors(prev.id).includes(r.id);
   const doRender = () => {
     renderPage(); renderSide();
+    checkCleared(); // opening Today when it's already clear shows the cleared page (seen on the real Mac)
     // Land keyboard focus in the new page, including after a mouse click in the sidebar or a palette jump,
     // so single-key shortcuts keep working (a11y-09, review interaction-2). Then announce what rendered.
     const a = document.activeElement, m = $('#main');
