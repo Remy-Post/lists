@@ -29,7 +29,7 @@ for (const f of ['mona-text.woff2', 'mona-display.woff2']) {
 cpSync(join(SRC, 'fonts', 'OFL.txt'), join(A, 'OFL.txt'));
 
 // CSS
-for (const f of ['app.css', 'phone.css', 'desk.css']) {
+for (const f of ['app.css', 'phone.css', 'desk.css', 'panels.css']) {
   let css = readFileSync(join(SRC, 'css', f), 'utf8');
   for (const [k, v] of Object.entries(names)) css = css.replaceAll(`/assets/${k}`, `/assets/${v}`);
   const r = await build({ stdin: { contents: css, loader: 'css' }, write: false, minify: true, target: ['chrome111', 'safari16.4', 'firefox115'] });
@@ -44,7 +44,7 @@ for (const f of ['app.css', 'phone.css', 'desk.css']) {
 const lazyNames = {};
 for (const m of ['gl', 'panels', 'sync']) {
   const r = await build({ entryPoints: [join(SRC, 'js', m + '.js')], bundle: true, format: 'esm', minify: true, write: false,
-    target: ['chrome111', 'safari16.4', 'firefox115'], legalComments: 'none' });
+    target: ['chrome111', 'safari16.4', 'firefox115'], legalComments: 'none', define: { PANELS_CSS: JSON.stringify('/assets/' + names['panels.css']) } });
   const out = r.outputFiles[0].contents;
   const n = `${m}-${hash(out)}.js`;
   writeFileSync(join(A, n), out);

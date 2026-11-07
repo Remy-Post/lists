@@ -431,11 +431,11 @@ let panels = null;
 const lazy = (name) => async (...a) => {
   if (!panels) {
     panels = await import('./panels.js');
-    panels.install({ S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone });
+    await panels.install({ S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone });
   }
   return ui[name](...a);
 };
-for (const n of ['cheat', 'settings', 'exportMd', 'exportJson', 'importFile']) ui[n] = lazy(n);
+for (const n of ['cheat', 'settings', 'exportMd', 'exportJson', 'importFile', 'confirmPair']) ui[n] = lazy(n);
 
 /* ---------------- theme ---------------- */
 ui.setTheme = (v) => {
@@ -480,20 +480,6 @@ ui.accessory = (show) => {
   acc.inert = !show;
   document.body.classList.toggle('typing', !!show);
 };
-
-/* ---------------- pairing confirmation ---------------- */
-ui.confirmPair = (code) => new Promise((resolve) => {
-  const groups = code.replace(/[^0-9A-Za-z]/g, '').toUpperCase().match(/.{1,4}/g) || [];
-  let done = false;
-  const finish = (v) => { if (done) return; done = true; close(entry); resolve(v); };
-  const panel = h('section', { class: 'pair' },
-    h('h2', null, 'Pair this device?'),
-    h('p', null, 'This link connects this device to an encrypted Lists account. Your lists here will be added to it and synced.'),
-    h('p', { class: 'muted' }, 'Only continue if you made this link on your own device. Check that the code there starts and ends like this:'),
-    h('code', { class: 'code' }, (groups[0] || '') + ' … ' + (groups[groups.length - 1] || '')),
-    h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => finish(true) }, 'Pair'), h('button', { class: 'btn', onclick: () => finish(false) }, 'Cancel')));
-  const entry = open(panel, { label: 'Pair this device', onClose: () => finish(false) });
-});
 
 /* ---------------- misc ---------------- */
 ui.escape = () => {

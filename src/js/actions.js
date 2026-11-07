@@ -19,6 +19,8 @@ export function visible(id) {
 const outlinePage = () => st.route.view === 'node' || st.route.view === 'inbox';
 /** Ids in document order, dropping any whose ancestor is also in the set. */
 export function tops(ids) {
+  // One item needs no ordering (and skips a whole-tree order walk on every indent).
+  if (ids.length <= 1) return ids.filter((id) => S.recs.has(id));
   const set = new Set(ids);
   const o = S.order();
   return [...set].filter((id) => !S.ancestors(id).some((a) => set.has(a))).sort((a, b) => (o.get(a) ?? 0) - (o.get(b) ?? 0));

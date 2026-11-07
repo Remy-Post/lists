@@ -4,7 +4,15 @@
 let S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone;
 export function install(d) {
   ({ S, O, A, DB, st, h, renderPage, renderSide, commands, pretty, ui, open, close, phone } = d);
-  wire();
+  wire(); wirePair();
+  // Panel styles live in their own lazy stylesheet; wait for it so nothing opens unstyled.
+  if (typeof PANELS_CSS !== 'string' || document.querySelector('link[data-panels]')) return Promise.resolve();
+  return new Promise((res) => {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = PANELS_CSS; l.dataset.panels = '';
+    l.onload = l.onerror = () => res();
+    document.head.append(l);
+  });
 }
 function wire() {
 /* ---------------- cheat sheet ---------------- */
@@ -32,7 +40,7 @@ ui.settings = async () => {
     const seg = (name, cur, opts, on) => h('div', { class: 'seg', role: 'radiogroup', 'aria-label': name }, ...opts.map(([v, l]) => h('button', { role: 'radio', 'aria-checked': String(cur === v), class: cur === v ? 'on' : '', onclick: () => { on(v); draw(); } }, l)));
     const age = ss && ss.lastPush ? relAge(Date.now() - ss.lastPush) : 'never';
     const days = DB.getMeta('backupDays') ?? 3;
-    panel.replaceChildren(
+    panel.replaceChildren(...[
       h('h2', null, 'Settings'),
       h('div', { class: 'srow' }, h('span', { class: 'k' }, 'Theme'), seg('Theme', theme, [['system', 'System'], ['paper', 'Paper'], ['graphite', 'Graphite']], (v) => ui.setTheme(v))),
       h('h3', null, 'Backup & sync'),
@@ -66,7 +74,7 @@ ui.settings = async () => {
       h('p', { class: 'muted small' }, `Lists ${window.LISTS_VERSION || ''}, ${S.recs.size} records. Open source.`),
       // Device facts for tuning the two target layouts (PLAN §10): read them off the real phone and Mac.
       h('p', { class: 'muted small', id: 'devinfo' }, `This device: ${innerWidth}×${innerHeight} CSS px, screen ${screen.width}×${screen.height}, ${devicePixelRatio}× pixels${matchMedia('(color-gamut: p3)').matches ? ', P3 colour' : ''}${navigator.connection ? ', ' + (navigator.connection.type || navigator.connection.effectiveType) : ''}.`),
-    );
+    ].filter(Boolean)); // optional sections are null when absent; never render them as text
   };
   draw();
 };
@@ -227,4 +235,20 @@ function toMarkdown(rootId = S.ROOT) {
   };
   walk(rootId, 0);
   return out.join('\n').trim() + '\n';
+}
+
+function wirePair() {
+// Pairing confirmation (moved from ui.js: rare, and it needs these panel styles).
+ui.confirmPair = (code) => new Promise((resolve) => {
+  const groups = code.replace(/[^0-9A-Za-z]/g, '').toUpperCase().match(/.{1,4}/g) || [];
+  let done = false;
+  const finish = (v) => { if (done) return; done = true; close(entry); resolve(v); };
+  const panel = h('section', { class: 'pair' },
+    h('h2', null, 'Pair this device?'),
+    h('p', null, 'This link connects this device to an encrypted Lists account. Your lists here will be added to it and synced.'),
+    h('p', { class: 'muted' }, 'Only continue if you made this link on your own device. Check that the code there starts and ends like this:'),
+    h('code', { class: 'code' }, (groups[0] || '') + ' … ' + (groups[groups.length - 1] || '')),
+    h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => finish(true) }, 'Pair'), h('button', { class: 'btn', onclick: () => finish(false) }, 'Cancel')));
+  const entry = open(panel, { label: 'Pair this device', onClose: () => finish(false) });
+});
 }

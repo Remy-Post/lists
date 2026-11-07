@@ -54,5 +54,12 @@ for (const sd of [7, 42, 1234]) test(`incremental counts and open items equal a 
     const t = S.qToday(today);
     const expectToday = [...b.items].filter((x) => S.val(x, 'when') && S.val(x, 'when') <= today).sort();
     assert.deepEqual([...t.day, ...t.eve].sort(), expectToday, `Today after step ${step}`);
+    const dfs = []; const walkO = (p) => { for (const c of S.children(p)) { dfs.push(c); walkO(c); } }; walkO(S.ROOT);
+    const exp = dfs.filter((x) => t.day.includes(x));
+    assert.deepEqual(t.day, exp, `Today order after step ${step}`);
+    const expectLog = [];
+    const walkD = (p) => { for (const c of S.children(p)) { if (S.val(c, 'done') && ['item', 'log'].includes(S.val(c, 'kind'))) expectLog.push(c); walkD(c); } };
+    walkD(S.ROOT);
+    assert.deepEqual(S.qLogbook(100000).slice().sort(), expectLog.sort(), `Logbook after step ${step}`);
   }
 });

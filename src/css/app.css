@@ -323,22 +323,6 @@ button.i-field:active { background: var(--hover); }
 .dp-grid .day.on { background: var(--fill); color: var(--on-blue); }
 .dp-grid .day:active { background: var(--wash); }
 
-/* sheets: settings, cheat, pair */
-.settings, .cheat, .pair { padding: 22px 24px 24px; }
-.settings h2, .cheat h2, .pair h2 { margin: 0 0 12px; font: 640 22px/28px var(--display); }
-.settings h3, .cheat h3 { margin: 22px 0 8px; font-size: 13px; color: var(--ink-2); font-weight: 560; }
-.settings p, .pair p { margin: 0 0 10px; font-size: 14px; line-height: 21px; max-width: 60ch; }
-.srow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; flex-wrap: wrap; }
-.srow .k { font-size: 14px; }
-.acts { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
-.code { display: block; font: 560 17px/26px var(--font); letter-spacing: 0.06em; font-variant-numeric: tabular-nums; word-break: break-all; padding: 12px 14px; border-radius: 10px; background: var(--sunk); margin: 10px 0 12px; user-select: all; }
-.code-in { height: 46px; font-size: 16px; letter-spacing: 0.05em; border-bottom: 1px solid var(--rule); margin: 6px 0 14px; text-transform: uppercase; }
-.cheat .cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0 28px; }
-.cheat .grp { display: block; padding: 0; border: 0; margin: 0; }
-.kr { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 30px; font-size: 13.5px; border-bottom: 1px solid var(--rule); }
-.kr .ks { display: inline-flex; gap: 4px; }
-.lyr.modal .panel.cheat { width: min(880px, calc(100vw - 32px)); top: 10vh; max-height: 80vh; }
-
 /* toast */
 .toast:not(.in) { visibility: hidden; transition: transform 200ms var(--ease), opacity 160ms var(--ease), visibility 0s 200ms; }
 .toast { position: fixed; left: 50%; bottom: 24px; z-index: 70; display: flex; align-items: center; gap: 4px; min-height: 40px; padding: 4px 6px 4px 16px; border-radius: 10px; background: var(--ink); color: var(--paper); font-size: 13.5px; box-shadow: 0 8px 28px -6px color-mix(in oklch, var(--ink) 40%, transparent); translate: -50% 0; transform: translateY(12px); opacity: 0; pointer-events: none; transition: transform 260ms var(--spring-lift), opacity 160ms var(--ease); max-width: calc(100vw - 32px); }
@@ -455,9 +439,6 @@ body[data-view="logbook"] svg.strike path { opacity: 0.5; }
 .qa-hint kbd { margin: 0 2px; }
 .qa-add { margin-left: auto; height: 44px; padding: 0 22px; }
 
-/* Cheat sheet in balanced columns (S3-10). */
-.cheat .cols { display: block; columns: 3 250px; column-gap: 28px; }
-.cheat .grp { break-inside: avoid; margin-bottom: 8px; }
 
 /* Phone/tablet keyboard toolbar, styled wherever there is a coarse pointer (req-trust-touch-09). */
 .acc { display: none; }

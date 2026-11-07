@@ -128,6 +128,19 @@ async function page(vp = { width: 1500, height: 900 }, extra = {}) {
   check('Mac: opening an already-clear Today shows the cleared page', r.cleared && r.ckVisible === '0', JSON.stringify(r));
   await ctx.close();
 }
+{ // no surface ever renders a stray "null"/"undefined" (seen in the inspector, then Settings)
+  const { ctx, p } = await page();
+  const bad = [];
+  const scan = async (name) => { await p.waitForTimeout(350); const t = await p.evaluate(() => (document.querySelector('.lyr .panel, #insp:not([hidden])') || {}).innerText || ''); if (/\b(null|undefined)\b/.test(t)) bad.push(name); await p.evaluate(() => { window.__lists.ui.closeAll(); window.__lists.ui.closeInsp(); }); };
+  await p.evaluate(() => window.__lists.ui.settings()); await scan('settings');
+  await p.evaluate(() => window.__lists.ui.openInsp(window.__lists.st.rows[0] || window.__lists.S.children(window.__lists.S.INBOX)[0])); await scan('inspector');
+  await p.evaluate(() => window.__lists.ui.palette('all')); await scan('palette');
+  await p.evaluate(() => window.__lists.ui.compose()); await scan('quick add');
+  await p.evaluate(() => window.__lists.ui.datePicker([window.__lists.S.children(window.__lists.S.INBOX)[0]], 'when')); await scan('date picker');
+  await p.evaluate(() => window.__lists.ui.cheat()); await scan('cheat sheet');
+  check('no surface renders a literal "null" or "undefined"', bad.length === 0, bad.join(','));
+  await ctx.close();
+}
 // ---- virtualization (600 rows): focus survives the sliding window (v-1), off-window anchors (v-2), drag (v-3)
 async function bigList(p, n = 600) {
   return p.evaluate((n) => { const { A, O, S, ui } = window.__lists; let l; O.tx('fx', () => { l = A.newList('Big'); for (let i = 0; i < n; i++) O.create({ title: 'r' + i, pos: S.posAt(l, i) }); }); ui.go({ view: 'node', id: l }, 'key'); return l; }, n);

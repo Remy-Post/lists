@@ -79,5 +79,3 @@ export function paintStrike(host, geo, seed, animate) {
   });
   return svg;
 }
-/** Measure and paint one row (convenience). */
-export function drawStrike(host, textEl, seed, animate) { return paintStrike(host, measureStrike(host, textEl), seed, animate); }

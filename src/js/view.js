@@ -14,7 +14,6 @@ export const ICON = {
   check: '<svg viewBox="0 0 20 20" aria-hidden="true"><rect class="box" x="1.5" y="1.5" width="17" height="17" rx="5"/><path class="tick" d="M5.6 10.3 8.7 13.3 14.6 6.9"/></svg>',
   flag: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 11V1.5M2.5 2h6.2l-1.4 2.2 1.4 2.3H2.5"/></svg>',
   rep: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 5.2A4 4 0 0 1 9.4 3.4M10 6.8a4 4 0 0 1-7.4 1.8M9.6 1.4v2.2H7.4M2.4 10.6V8.4h2.2"/></svg>',
-  note: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 3h8M2 6h8M2 9h5"/></svg>',
   moon: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M9.8 7.6A4.3 4.3 0 0 1 4.4 2.2a4.3 4.3 0 1 0 5.4 5.4Z"/></svg>',
 };
 
@@ -73,9 +72,8 @@ function groupsFor(view) {
       return (w && w <= t) || (dl && dl <= t);
     });
     // Completed items stay where they were, struck, until tomorrow: never jump out from under the pointer.
-    const ord = S.order(), byOrd = (x, y) => (ord.get(x) ?? 0) - (ord.get(y) ?? 0);
-    const g = [{ key: 'day', rows: [...day, ...done.filter((id) => !(S.val(id, 'evening')))].sort(byOrd) }];
-    const e = [...eve, ...done.filter((id) => S.val(id, 'evening'))].sort(byOrd);
+    const g = [{ key: 'day', rows: S.sortByOrder([...day, ...done.filter((id) => !(S.val(id, 'evening')))]) }];
+    const e = S.sortByOrder([...eve, ...done.filter((id) => S.val(id, 'evening'))]);
     if (e.length) g.push({ key: 'eve', label: 'This evening', icon: ICON.moon, rows: e });
     return g;
   }
@@ -97,14 +95,15 @@ function groupsFor(view) {
       groups.get(key).rows.push(...byDate.get(d));
     }
     // Within a group: by date first (multi-day groups), then where the item lives, so completing one never reorders it.
-    const ord = S.order(), dateOf = (id) => [S.val(id, 'when'), S.val(id, 'deadline')].filter((x) => x && x > t).sort()[0] || '';
-    for (const g of groups.values()) g.rows.sort((x, y) => (dateOf(x) < dateOf(y) ? -1 : dateOf(x) > dateOf(y) ? 1 : (ord.get(x) ?? 0) - (ord.get(y) ?? 0)));
+    let ord = null; const dateOf = (id) => [S.val(id, 'when'), S.val(id, 'deadline')].filter((x) => x && x > t).sort()[0] || '';
+    for (const g of groups.values()) if (g.rows.length > 1) { ord ||= S.order(); g.rows.sort((x, y) => (dateOf(x) < dateOf(y) ? -1 : dateOf(x) > dateOf(y) ? 1 : (ord.get(x) ?? 0) - (ord.get(y) ?? 0))); }
     return [...groups.values()];
   }
   if (view === 'someday') {
     const done = S.qDoneToday(todayStart()).filter((id) => S.val(id, 'someday') && !S.val(id, 'when'));
-    const ord = S.order();
-    return [{ key: 'sd', rows: [...S.qSomeday(), ...done].sort((x, y) => (ord.get(x) ?? 0) - (ord.get(y) ?? 0)) }];
+    const rows = [...S.qSomeday(), ...done];
+    S.sortByOrder(rows);
+    return [{ key: 'sd', rows }];
   }
   if (view === 'logbook') {
     const m = new Map();
@@ -531,9 +530,17 @@ function renderEmpty() {
 }
 
 /* ---------------- sidebar ---------------- */
+let badgeJob = 0, lastTodayN = 0;
 export function renderSide() {
   const t = today();
-  const counts = { inbox: S.children(S.INBOX).filter((c) => !S.val(c, 'done')).length, today: S.qTodayCount(t) };
+  // The Today badge needs a pass over every open item; it updates in idle time so an edit never waits on it.
+  const counts = { inbox: S.children(S.INBOX).filter((c) => !S.val(c, 'done')).length, today: lastTodayN };
+  if (!badgeJob) badgeJob = (window.requestIdleCallback || setTimeout)(() => {
+    badgeJob = 0;
+    lastTodayN = S.qTodayCount(today());
+    const n = document.querySelector('[data-nav="today"] .n');
+    if (n) n.textContent = lastTodayN ? String(lastTodayN) : '';
+  }, { timeout: 300 });
   for (const b of document.querySelectorAll('[data-nav]')) {
     const v = b.dataset.nav;
     const on = st.route.view === v || (v === 'inbox' && st.route.view === 'node' && S.ancestors(st.route.id)[0] === S.INBOX);
