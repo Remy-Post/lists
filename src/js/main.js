@@ -4,7 +4,7 @@ import * as O from './ops.js';
 import * as A from './actions.js';
 import * as DB from './db.js';
 import { st, $, MOD } from './state.js';
-import { renderPage, renderSide, rowEl, transition, dayChanged, refillRow } from './view.js';
+import { renderPage, renderSide, rowEl, peekRow, transition, dayChanged, refillRow } from './view.js';
 import { wire, focusRow } from './input.js';
 import { wireKeys } from './keys.js';
 import { wireGestures } from './gesture.js';
@@ -51,7 +51,7 @@ function schedule(flip) {
 S.subscribe((ids, structural, fields) => {
   if (!structural && fields && ids.size === 1 && [...fields].every((f) => f === 'title' || f === 'notes')) {
     const id = [...ids][0];
-    if (rowEl(id) && rowEl(id).isConnected) { refillRow(id); if (S.parentOf(id) === S.ROOT) renderSide(); return; }
+    if (peekRow(id) && peekRow(id).isConnected) { refillRow(id); if (S.parentOf(id) === S.ROOT) renderSide(); return; }
   }
   schedule(structural);
 });
@@ -214,7 +214,7 @@ function checkCleared(force) {
   if (st.route.view !== 'today') { wasOpen = null; forcedClear = false; document.body.classList.remove('cleared'); return; }
   if (force) forcedClear = true; // #/debug/clear stays cleared until you navigate away
   const open = todayOpen();
-  const doneN = $('#outline').querySelectorAll('.row.done').length;
+  const doneN = st.rows.filter((id) => S.val(id, 'done')).length; // model, not DOM: long pages are virtualized
   const cleared = (open === 0 && doneN > 0) || forcedClear;
   document.body.classList.toggle('cleared', !!cleared);
   if (cleared) { const c = $('#empty .cnt'); if (c) c.textContent = `${doneN} done`; }

@@ -162,7 +162,7 @@ Every v1 feature works on both devices; every §6 gate passes; the docs are curr
 | Device | innerWidth × innerHeight | DPR | screen | notes |
 |---|---|---|---|---|
 | S25 Ultra | _tbd_ | _tbd_ | _tbd_ | |
-| MBP 16" | _tbd_ | _tbd_ | _tbd_ | |
+| MBP 16" (measured 2026-11-07 on Remy's Mac via Claude in Chrome) | 960 × 907 (window tiled to half the screen; desktop layout needs ≥ 1200) | 2 | 1728 × 1117, avail 1728 × 1084 | GPU: Apple M5 Pro (ANGLE Metal). P3 and HDR available. Mona fonts loaded, service worker active, WebGL2 light works. Chrome 156 |
 
 ---
 

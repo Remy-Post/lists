@@ -6,7 +6,7 @@ import * as A from './actions.js';
 import * as DB from './db.js';
 import { st, $, h, MOD, haptic } from './state.js';
 import { parseQuick, suggestDates, formatDay, describeRRule, fromYMD, ymd } from './parse.js';
-import { renderPage, renderSide, rowEl, ICON } from './view.js';
+import { renderPage, renderSide, rowEl, peekRow, ICON } from './view.js';
 import { commands, pretty } from './keys.js';
 import { structural } from './input.js';
 
@@ -74,6 +74,7 @@ function place(panel, anchor) {
     let x = Math.min(innerWidth - pw - 12, Math.max(12, r.left));
     let y = r.bottom + 6;
     if (y + ph > innerHeight - 12) y = Math.max(12, r.top - ph - 6);
+    y = Math.min(Math.max(12, y), Math.max(12, innerHeight - ph - 12)); // an off-screen anchor still opens on screen
     panel.style.left = x + 'px'; panel.style.top = y + 'px';
     panel.style.transformOrigin = `${r.left - x + 12}px ${y > r.top ? 0 : ph}px`;
   });
@@ -210,7 +211,7 @@ function autosize(t) { t.style.height = 'auto'; t.style.height = t.scrollHeight 
 ui.datePicker = (ids, mode, anchor) => {
   ids = ids.filter((id) => S.recs.has(id));
   if (!ids.length) return;
-  anchor = anchor || rowEl(ids[0])?.querySelector('.tl') || $('#ptitle');
+  anchor = anchor || peekRow(ids[0])?.querySelector('.tl') || (st.cursor && peekRow(st.cursor)?.querySelector('.tl')) || $('#ptitle');
   const cur = S.val(ids[0], mode);
   let month = fromYMD(cur || A.today()); month.setDate(1);
   const input = h('input', { class: 'dp-in', placeholder: mode === 'when' ? 'When? tomorrow, fri, in 3 days…' : 'Deadline? fri, nov 30…', 'aria-label': mode === 'when' ? 'When' : 'Deadline', autocomplete: 'off', enterkeyhint: 'done' });

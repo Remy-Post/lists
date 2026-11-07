@@ -477,6 +477,5 @@ body:has(.lyr.sheet.in) .toast { bottom: auto; top: max(12px, env(safe-area-inse
 .topbar .more { margin-left: auto; }
 #main:focus, #ptitle:focus:not([contenteditable="true"]):not([contenteditable="plaintext-only"]) { outline: none; }
 
-/* Long lists: the browser skips layout and paint for rows far offscreen (QA perf). */
-.row { content-visibility: auto; contain-intrinsic-size: auto var(--row-h); }
-.row.cur, .row.sel, .row.swiping, .drag-ghost { content-visibility: visible; }
+/* Long lists are virtualized in view.js: spacers stand in for rows far from the viewport. */
+.vspace { pointer-events: none; }

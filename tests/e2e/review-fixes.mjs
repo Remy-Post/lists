@@ -92,6 +92,59 @@ async function page(vp = { width: 1500, height: 900 }, extra = {}) {
   const r = await c.evaluate(() => ({ every: window.__lists.DB.getMeta('syncEvery'), label: document.querySelector('#sync .sl').textContent }));
   check('platform-1/7: other tab loads sync and mirrors settings', r.every === 7 && r.label !== 'On this device', JSON.stringify(r)); await ctx.close();
 }
+{ // real-device finding (Mac, 2026-11-07): completing an item in Today must not move it
+  const { ctx, p } = await page();
+  await p.evaluate(() => window.__lists.ui.go({ view: 'today' }, 'key')); await p.waitForTimeout(150);
+  const first = await p.evaluate(() => window.__lists.st.rows[0]);
+  await p.click('.row:nth-child(1) .ck'); await p.waitForTimeout(300);
+  const after = await p.evaluate(() => window.__lists.st.rows[0]);
+  check('Mac: a completed item keeps its place in Today', first === after);
+  await ctx.close();
+}
+// ---- virtualization (600 rows): focus survives the sliding window (v-1), off-window anchors (v-2), drag (v-3)
+async function bigList(p, n = 600) {
+  return p.evaluate((n) => { const { A, O, S, ui } = window.__lists; let l; O.tx('fx', () => { l = A.newList('Big'); for (let i = 0; i < n; i++) O.create({ title: 'r' + i, pos: S.posAt(l, i) }); }); ui.go({ view: 'node', id: l }, 'key'); return l; }, n);
+}
+{
+  const { ctx, p } = await page({ width: 1280, height: 800 });
+  const l = await bigList(p); await p.waitForTimeout(200);
+  await p.evaluate(() => { const { st } = window.__lists; window.__lists.ui.focus(st.rows[400]); });
+  await p.waitForTimeout(150); await p.keyboard.press('Enter'); await p.keyboard.press('End');
+  for (let i = 0; i < 40; i++) { await p.keyboard.press('Enter'); await p.keyboard.type('new' + i); }
+  await p.keyboard.press('Escape'); await p.waitForTimeout(200);
+  const titles = await p.evaluate((l) => window.__lists.S.children(l).map((c) => window.__lists.S.val(c, 'title')).filter((t) => /^new/.test(t)), l);
+  const ok = titles.length === 40 && titles.every((t, i) => t === 'new' + i);
+  check('v-1: typing 40 rows deep in a 600-row list keeps focus and text', ok, titles.length + ' rows' + (ok ? '' : ': ' + titles.slice(0, 6).join(',')));
+  // j-navigation focus across the window edge
+  await p.evaluate(() => { scrollTo(0, 0); window.__lists.ui.focus(window.__lists.st.rows[0]); }); await p.waitForTimeout(150);
+  let lost = 0;
+  for (let i = 0; i < 120; i++) { await p.keyboard.press('j'); if (i % 10 === 9) { const bad = await p.evaluate(() => !document.activeElement.closest || !document.activeElement.closest('.row')); if (bad) lost++; } }
+  check('v-1: j through 120 rows never drops focus to <body>', lost === 0, lost + ' losses');
+  // edit then scroll: caret survives
+  await p.evaluate(() => { scrollTo(0, 0); }); await p.waitForTimeout(100);
+  await p.click('.row:nth-child(12) .tx'); await p.keyboard.press('End');
+  await p.mouse.wheel(0, 2400); await p.waitForTimeout(400); await p.keyboard.type('ZZ'); await p.waitForTimeout(100);
+  const zz = await p.evaluate(() => [...window.__lists.S.recs.values()].some((r) => /ZZ$/.test(window.__lists.S.val(r.id, 'title'))));
+  check('v-1: typing after scrolling away from the edited row still lands in it', zz);
+  // v-2: date picker for an off-window row keeps the visible rows
+  await p.evaluate(() => { window.__lists.ui.focus(window.__lists.st.rows[400]); }); await p.waitForTimeout(250);
+  await p.evaluate(() => { const { st } = window.__lists; st.sel = new Set([st.rows[0], st.rows[400]]); });
+  await p.keyboard.press('t'); await p.waitForTimeout(300);
+  const vis = await p.evaluate(() => [...document.querySelectorAll('.row')].filter((r) => { const b = r.getBoundingClientRect(); return b.bottom > 0 && b.top < innerHeight; }).length);
+  const pick = await p.evaluate(() => { const pnl = document.querySelector('.lyr .panel'); if (!pnl) return 'none'; const b = pnl.getBoundingClientRect(); return b.top >= 0 && b.bottom <= innerHeight ? 'on-screen' : 'off ' + Math.round(b.top); });
+  check('v-2: date picker for an off-window row keeps rows visible and opens on screen', vis > 5 && pick === 'on-screen', vis + ' visible, picker ' + pick);
+  await p.keyboard.press('Escape');
+  // v-3: drag with autoscroll keeps the drop line
+  await p.evaluate(() => scrollTo(0, 0)); await p.waitForTimeout(200);
+  const r3 = await p.locator('.row:nth-child(5)').boundingBox();
+  await p.mouse.move(r3.x + r3.width - 40, r3.y + r3.height / 2); await p.mouse.down();
+  await p.mouse.move(r3.x + r3.width - 40, r3.y + 40, { steps: 4 }); await p.mouse.move(r3.x + r3.width - 40, 795, { steps: 6 });
+  await p.waitForTimeout(2500);
+  const line = await p.evaluate(() => !!document.querySelector('#outline .drop-line') && document.querySelector('.drop-line').isConnected);
+  await p.mouse.up(); await p.waitForTimeout(200);
+  check('v-3: drop line survives autoscroll across the window', line);
+  await ctx.close();
+}
 await b.close();
 const failed = results.filter((r) => !r[0]).length;
 console.log(`review-fixes: ${results.length - failed}/${results.length} passed`);

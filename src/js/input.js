@@ -5,7 +5,7 @@ import * as S from './store.js';
 import * as O from './ops.js';
 import * as A from './actions.js';
 import { st, $, pageRoot, haptic } from './state.js';
-import { rowEl, renderPage, renderSide } from './view.js';
+import { rowEl, peekRow, renderPage, renderSide } from './view.js';
 import { ui } from './ui.js';
 
 /* ---------------- caret ---------------- */
@@ -48,7 +48,7 @@ function onEdge(tx, dir) {
 /* ---------------- focus & selection ---------------- */
 export function focusRow(id, o = {}) {
   if (!id) return;
-  const prev = st.cursor && rowEl(st.cursor);
+  const prev = st.cursor && peekRow(st.cursor);
   if (prev) prev.classList.remove('cur');
   st.cursor = id;
   if (!o.keepSel) { st.sel = new Set([id]); st.anchor = id; }
@@ -74,7 +74,7 @@ export function focusRow(id, o = {}) {
   ui.follow(id);
 }
 export function paintSel() {
-  for (const id of st.rows) { const el = rowEl(id); if (el) { const on = st.sel.has(id); el.classList.toggle('sel', on); el.setAttribute('aria-selected', String(on)); } }
+  for (const id of st.rows) { const el = peekRow(id); if (el) { const on = st.sel.has(id); el.classList.toggle('sel', on); el.setAttribute('aria-selected', String(on)); } }
 }
 export function extendTo(id) {
   const a = st.rows.indexOf(st.anchor ?? st.cursor), b = st.rows.indexOf(id);
@@ -164,7 +164,7 @@ function vertical(id, tx, dir) {
   }
   if (!placed) setCaret(el._tx, dir < 0 ? 'end' : 0);
   // Keep focus in the text (audit S2-2): update cursor and selection without focusing the row.
-  const prevEl = st.cursor && rowEl(st.cursor);
+  const prevEl = st.cursor && peekRow(st.cursor);
   if (prevEl) prevEl.classList.remove('cur');
   st.cursor = target; st.sel = new Set([target]); st.anchor = target; st.mode = 'edit';
   el.classList.add('cur'); paintSel();
@@ -193,7 +193,7 @@ export function wire() {
     if (!id) return;
     if (e.target.classList.contains('tx')) {
       st.mode = 'edit';
-      if (st.cursor !== id) { const p = st.cursor && rowEl(st.cursor); if (p) p.classList.remove('cur'); st.cursor = id; rowEl(id).classList.add('cur'); }
+      if (st.cursor !== id) { const p = st.cursor && peekRow(st.cursor); if (p) p.classList.remove('cur'); st.cursor = id; peekRow(id)?.classList.add('cur'); }
       if (!st.sel.has(id) || st.sel.size > 1) { st.sel = new Set([id]); st.anchor = id; paintSel(); }
       ui.follow(id);
       ui.accessory(true);

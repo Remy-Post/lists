@@ -11,6 +11,7 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 | 2 | Visual audit (`04-visual-audit.md`): 4×S1, 16×S2, 18×S3; requirements, security and accessibility workflow: 60 findings confirmed by adversarial verifiers | All S1/S2 fixed, plus most S3s (commit "Round 2…"). Visual S1s re-measured: sheets on-screen, no `null`, cleared headline above the fold, checkbox–title Δ ≤ 1.5 px, 0 contrast failures |
 | 3 | QA harness (`03-qa-report.md`) + server security fixes | Server hardened (8 findings) and redeployed; client handles 507/503/429; dialog focus is synchronous; draft flush |
 | 5 | Final fresh-eyes regression review (19 confirmed findings, each verified by a skeptic) + 10k profiling | All 19 fixed and re-verified by `tests/e2e/review-fixes.mjs` (9/9). Row signatures use local revisions; on-demand rows; one Tab stop; quick-add order and click-to-literal; keys work after mouse navigation; lazy sync loads in already-open tabs and retries after a failed chunk; zoom origin measured before scroll; only real zooms animate; drawer closes with a mouse; shared sync settings mirror across tabs; one allocation-free tree walk per change (Today query 3–20 ms → ~1 ms on 10k) |
+| 6 | Row virtualization + first real-device test (Remy's Mac: M5 Pro, 1728×1117 @2x, P3/HDR) + independent review (3 confirmed: focus lost when the window slides, blank list for off-window anchors, drag line lost on autoscroll) | Pages over 300 items render only rows near the viewport. Review findings fixed and covered by `review-fixes.mjs` (15/15). The Mac test found completed items jumping to the bottom of Today; they now stay in place in every smart view. Settings shows the device's viewport, DPR and connection, so the S25 can be measured without remote debugging |
 | 4 | QA bugs B1, B2, B5, B7 + 10k fixtures | Memo kept across title edits, scroll-before-render, rows cloned from a template and streamed in chunks, unchanged rows skip re-fill, two-phase strikes, SW precache through the HTTP cache and registered after load, View Transitions only for zoom |
 
 ## Gate results (latest)
@@ -23,10 +24,10 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 | Sync gate under 3G | waits | 'Waiting for a good connection', 0 requests; syncs when the link is good and the backup stale |
 | SIGKILL 300 ms / 1 s after the last keystroke | 100% | 10/10, 10/10 |
 | Two-device sync convergence, cycle repair | identical trees | pass (22/22 checks) |
-| Rendering 500 rows (QA perf.mjs) | no long task > 50 ms, CPU ×1 | none (was 169 ms) |
+| Rendering 500 rows (QA perf.mjs) | no long task > 50 ms, CPU ×1 | none (was 169 ms); only ~51 rows in the DOM (virtualized) |
 | Typing, 2,000 items (QA perf.mjs) | key handler ≤ 16 ms | task p50 1.5 / p95 4.3 ms. Key→frame p95 22 ms against a blank-page floor of 15.8 ms on the same VM, so "≤ 16 ms key→frame" is restated as handler time |
 | 10k-item boot | ready ≤ 1.5 s | 342 ms at CPU ×1 (longest task 120 ms, was 515); 1.1 s at ×4 |
-| Edits on a 10k-item page | — | longest task 53 ms at CPU ×1 (was 202); 120–440 ms at ×4 (known limit) |
+| Edits on a 10k-item page | — | every edit type 50–58 ms at CPU ×4 (was 120–440); QA's script, which adds navigating away and back on 10k, peaks at 227 ms at ×4 |
 | Flows / two-device sync / unit | all | 44/44 · 22/22 · 44/44 |
 | Contrast | all text ≥ 4.5:1 | 0 failures, both themes, both devices |
 | Server memory | ≤ 30 MB | 14.7 MiB |
@@ -45,8 +46,8 @@ Each audit round, what it found, and what we did. Findings are in `docs/audits/`
 
 ## Known limits
 
-- **Very large pages on a slow CPU.** With 10k items and 500+ rows visible on one page, CPU ×4 on the 2-core ARM VM still has long tasks: 260–280 ms per edit or page open (from 400–440). The profile shows they are mostly native layout and paint. JS per edit is a single ~3 ms tree walk. At CPU ×1 the worst render task is 58 ms against the 50 ms gate on this noisy VM (other runs 0–66 ms). Removing the rest would need full row virtualization, which is deferred: it is a risky rewrite for page sizes personal lists don't reach, and the target phone and Mac are far faster than this box.
+- **10k items at CPU ×4 on the 2-core ARM VM.** Edits are 50–58 ms. Boot (495 ms) and navigating away from and back to a 10k page (up to 227 ms) are whole-model rebuilds, about 55 ms at CPU ×1. Beating that needs incremental views across the whole model; deferred, since it's far beyond personal-list scale.
 - **Typing key→frame p95 ≤ 16 ms is unreachable on this VM** (a blank page scores 16.6 ms p95), so the gate is the handler time: p95 4.5–5.9 ms.
 
 - Background tabs that are frozen (Page Lifecycle `frozen`) can't run IndexedDB writes. We flush on `visibilitychange: hidden`, which always comes first on real devices (QA: 100% survival).
-- The S25 Ultra's real CSS viewport and DPR still need measuring on the device (PLAN §10).
+- **S25 Ultra not yet measured.** Claude in Chrome can't open chrome://inspect. Open Settings on the phone: its last line shows viewport, screen, DPR and connection.

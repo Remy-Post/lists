@@ -18,19 +18,29 @@ export const ICON = {
   moon: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M9.8 7.6A4.3 4.3 0 0 1 4.4 2.2a4.3 4.3 0 1 0 5.4 5.4Z"/></svg>',
 };
 
-const els = new Map();      // id → row element (current page)
+const els = new Map();      // key → element, for rendered items only (rows by id, group headers by 'g:…')
 let pageKey = '';
-let pendQ = [], pendBox = null;
-// Rows not yet streamed in are created on demand when something targets them (focus, reveal, zoom-out).
-export const rowEl = (id) => els.get(id) || drainTo(id);
-function drainTo(id) {
-  if (!pendQ.some((p) => p[0] === id)) return undefined;
-  const frag = document.createDocumentFragment();
-  while (pendQ.length) {
-    const [pid, m] = pendQ.shift(); const el = makeRow(pid); els.set(pid, el); fillRow(el, pid, m, false); frag.append(el);
-    if (pid === id) break;
-  }
-  pendBox.append(frag);
+/* Virtualized page (QA perf, final round). The model (items, st.rows, st.info) always covers every row;
+   past VIRT items the DOM holds only the rows within about a screen of the viewport, between two spacers
+   sized from measured (cached) heights. Short pages render in full, so find-in-page and screen readers
+   see everything. */
+const VIRT = 300, OVERSCAN = 900;
+let items = [], index = new Map(), offs = [0], win = [0, 0], rowH = 36;
+const hcache = new Map();
+const topSp = h('div', { class: 'vspace', 'aria-hidden': 'true' });
+const botSp = h('div', { class: 'vspace', 'aria-hidden': 'true' });
+const virtual = () => items.length > VIRT;
+/** The row's element if it is rendered (never renders anything). */
+export const peekRow = (id) => els.get(id);
+/** The row's element, rendering the rows around it first if it is outside the window. */
+export const rowEl = (id) => els.get(id) || ensureRow(id);
+function ensureRow(id) {
+  const i = index.get(id);
+  if (i == null || items[i].grp) return undefined;
+  // Keep what's on screen and add the target's neighbourhood: nothing visible disappears (v-2). A far target
+  // gets its own window; the caller scrolls to it.
+  const v = withCursor(viewWindow()), near = [Math.max(0, i - 40), Math.min(items.length, i + 60)];
+  renderWindow(Math.abs(i - v[0]) < 250 || Math.abs(i - v[1]) < 250 ? [Math.min(v[0], near[0]), Math.max(v[1], near[1])] : near);
   return els.get(id);
 }
 const todayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return +d; };
@@ -43,11 +53,11 @@ function hiddenDone(id) {
 function outlineRows(root) {
   const out = [];
   const walk = (p, d) => {
-    for (const c of S.children(p)) {
-      if (S.val(c, 'kind') === 'log' || hiddenDone(c)) continue;
-      out.push({ id: c, depth: d, parent: p });
+    const list = S.children(p).filter((c) => S.val(c, 'kind') !== 'log' && !hiddenDone(c));
+    list.forEach((c, i) => {
+      out.push({ id: c, depth: d, parent: p, pos: i + 1, size: list.length });
       if (!st.collapsed.has(c) && S.hasChildren(c)) walk(c, d + 1);
-    }
+    });
   };
   walk(root, 0);
   return out;
@@ -60,8 +70,10 @@ function groupsFor(view) {
       const w = S.val(id, 'when'), dl = S.val(id, 'deadline');
       return (w && w <= t) || (dl && dl <= t);
     });
-    const g = [{ key: 'day', rows: [...day, ...done.filter((id) => !(S.val(id, 'evening')))] }];
-    const e = [...eve, ...done.filter((id) => S.val(id, 'evening'))];
+    // Completed items stay where they were, struck, until tomorrow: never jump out from under the pointer.
+    const ord = S.order(), byOrd = (x, y) => (ord.get(x) ?? 0) - (ord.get(y) ?? 0);
+    const g = [{ key: 'day', rows: [...day, ...done.filter((id) => !(S.val(id, 'evening')))].sort(byOrd) }];
+    const e = [...eve, ...done.filter((id) => S.val(id, 'evening'))].sort(byOrd);
     if (e.length) g.push({ key: 'eve', label: 'This evening', icon: ICON.moon, rows: e });
     return g;
   }
@@ -82,11 +94,15 @@ function groupsFor(view) {
       if (!groups.has(key)) groups.set(key, { key, label, date: d <= week ? d : null, rows: [] });
       groups.get(key).rows.push(...byDate.get(d));
     }
+    // Within a group: by date first (multi-day groups), then where the item lives, so completing one never reorders it.
+    const ord = S.order(), dateOf = (id) => [S.val(id, 'when'), S.val(id, 'deadline')].filter((x) => x && x > t).sort()[0] || '';
+    for (const g of groups.values()) g.rows.sort((x, y) => (dateOf(x) < dateOf(y) ? -1 : dateOf(x) > dateOf(y) ? 1 : (ord.get(x) ?? 0) - (ord.get(y) ?? 0)));
     return [...groups.values()];
   }
   if (view === 'someday') {
     const done = S.qDoneToday(todayStart()).filter((id) => S.val(id, 'someday') && !S.val(id, 'when'));
-    return [{ key: 'sd', rows: [...S.qSomeday(), ...done] }];
+    const ord = S.order();
+    return [{ key: 'sd', rows: [...S.qSomeday(), ...done].sort((x, y) => (ord.get(x) ?? 0) - (ord.get(y) ?? 0)) }];
   }
   if (view === 'logbook') {
     const m = new Map();
@@ -134,7 +150,7 @@ function makeRow(id) {
 
 /** Everything a row's appearance depends on; if unchanged, the DOM is already right. */
 function sigOf(id, m, smart) {
-  return S.rev(id) + '|' + (m.date || '') + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
+  return S.rev(id) + '|' + (m.date || '') + '|' + (m.pos || 0) + '/' + (m.size || 0) + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
     (st.collapsed.has(id) ? 1 : 0) + (st.sel.has(id) ? 1 : 0) + (st.cursor === id ? 1 : 0) + '|' + (S.hasChildren(id) ? S.countOpen(id) : -1) + '|' + (smart ? S.ancestors(id).map((a) => S.rev(a) + S.val(a, 'title')).join() : '') + '|' + (st.rows[0] === id ? 1 : 0);
 }
 export function fillRow(el, id, m, smart) {
@@ -157,6 +173,7 @@ export function fillRow(el, id, m, smart) {
   el.classList.toggle('smart', !!smart);
   el.classList.toggle('log', S.val(id, 'kind') === 'log');
   el.setAttribute('aria-level', (m.depth || 0) + 1);
+  if (m.pos) { el.setAttribute('aria-posinset', m.pos); el.setAttribute('aria-setsize', m.size); }
   if (kidsN && !smart) el.setAttribute('aria-expanded', String(!collapsed)); else el.removeAttribute('aria-expanded');
   el.setAttribute('aria-selected', String(st.sel.has(id)));
   el.tabIndex = st.cursor === id ? 0 : -1;
@@ -228,24 +245,25 @@ const safeDescribe = (r) => { try { return describeRRule(r); } catch { return 'R
 /* Strikes: rows queue themselves (strikeDirty) or are picked up when near the viewport. Every flush is
    two strict phases, all reads then all writes, so a long list never thrashes layout (QA perf). */
 const strikeDirty = new Set();
-/** Done rows near the viewport that still need a strike: a binary search over row offsets, so the cost
-    doesn't grow with the length of the list (an IntersectionObserver on every done row did). */
+/** Rendered done rows that still need a strike (rendered rows are always near the viewport). */
 function nearDoneRows() {
-  const box = document.getElementById('outline'), kids = box.children, n = kids.length;
-  if (!n) return [];
-  const top = -box.getBoundingClientRect().top - 400, bottom = top + innerHeight + 800;
-  let lo = 0, hi = n;
-  while (lo < hi) { const m = (lo + hi) >> 1; const k = kids[m]; if (k.offsetTop + k.offsetHeight < top) lo = m + 1; else hi = m; }
   const out = [];
-  for (let i = lo; i < n; i++) {
-    const k = kids[i];
-    if (k.offsetTop > bottom) break;
-    if (k._done && !k._drawn && k.dataset.id) out.push(k.dataset.id);
-  }
+  for (const [k, el] of els) if (el._done && !el._drawn && el.isConnected && !k.startsWith('g:')) out.push(k);
   return out;
 }
 let scrollRaf = 0;
-addEventListener('scroll', () => { if (!scrollRaf) scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; queueStrikes(); }); }, { passive: true });
+addEventListener('scroll', () => {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    if (virtual()) {
+      const r = withCursor(viewWindow());
+      // Re-render only when the needed range isn't already covered (or the window grew needlessly large).
+      if (r[0] < win[0] || r[1] > win[1] || win[1] - win[0] > (r[1] - r[0]) * 3) renderWindow(r);
+    }
+    queueStrikes();
+  });
+}, { passive: true });
 function flushStrikes() {
   const ids = [...new Set([...strikeDirty, ...nearDoneRows()])];
   strikeDirty.clear();
@@ -286,13 +304,19 @@ new ResizeObserver((e) => {
 }).observe(document.documentElement);
 
 /* ---------------- reconcile + FLIP ---------------- */
+/* Remove what's gone first, then insert what's new. Rows that stay are never detached, so a focused row
+   keeps its focus and caret while the virtual window slides (virtualization review v-1). Unmanaged
+   children (the drag drop-line) are left alone (v-3). */
+const unmanaged = (n) => n.nodeType === 1 && n.classList.contains('drop-line');
 function reconcile(box, nodes) {
+  const want = new Set(nodes);
+  for (const c of [...box.childNodes]) if (!want.has(c) && !unmanaged(c)) c.remove();
   let cur = box.firstChild;
   for (const n of nodes) {
+    while (cur && unmanaged(cur)) cur = cur.nextSibling;
     if (n === cur) { cur = cur.nextSibling; continue; }
-    box.insertBefore(n, cur);
+    box.insertBefore(n, cur); // new rows, or a real reorder (structural move)
   }
-  while (cur) { const nx = cur.nextSibling; cur.remove(); cur = nx; }
 }
 function measure() {
   const m = new Map();
@@ -318,69 +342,94 @@ function play(before) {
 
 /* ---------------- page ---------------- */
 let lastToday = '';
-// A fresh page paints its first rows at once and streams the rest in per-frame chunks, so opening a
-// 1,000-row list never blocks the main thread (QA perf gate: no long task > 50 ms).
-const FIRST = 48, CHUNK = 60; // ~1.5 screens first; then small slices that fit inside a frame
-let chunkJob = 0;
+function computeOffsets() {
+  const n = items.length;
+  offs = new Array(n + 1);
+  offs[0] = 0;
+  for (let i = 0; i < n; i++) {
+    const it = items[i];
+    offs[i + 1] = offs[i] + (hcache.get(it.key) ?? (it.grp ? 52 : rowH + (it.smart ? 17 : 0)));
+  }
+}
+/** Item range covering the viewport plus overscan, in outline coordinates. */
+function viewWindow() {
+  const n = items.length;
+  if (!virtual()) return [0, n];
+  const top = -$('#outline').getBoundingClientRect().top;
+  const lo = top - OVERSCAN, hi = top + innerHeight + OVERSCAN;
+  let a = 0, b = n;
+  while (a < b) { const m = (a + b) >> 1; if (offs[m + 1] <= lo) a = m + 1; else b = m; }
+  let e = a;
+  while (e < n && offs[e] < hi) e++;
+  return [a, Math.max(e, Math.min(n, a + 1))];
+}
+/** Keep the row you're on rendered, so focus and the caret survive scrolling. */
+function withCursor(r) {
+  const ci = st.cursor != null ? index.get(st.cursor) : undefined;
+  if (ci == null || (ci >= r[0] && ci < r[1]) || Math.abs(ci - r[0]) > 400) return r;
+  return [Math.min(r[0], ci), Math.max(r[1], ci + 1)];
+}
+function renderWindow([a, b]) {
+  const box = $('#outline');
+  win = [a, b];
+  const nodes = [], keep = new Set();
+  if (virtual()) nodes.push(topSp);
+  for (let i = a; i < b; i++) {
+    const it = items[i];
+    let el = els.get(it.key);
+    if (it.grp) {
+      if (!el) { el = h('div', { class: 'grp', role: 'presentation' }); els.set(it.key, el); }
+      if (el._h !== it.lab) { el.innerHTML = it.lab; el._h = it.lab; }
+    } else {
+      if (!el) { el = makeRow(it.id); els.set(it.key, el); }
+      fillRow(el, it.id, it.m, it.smart);
+      el.classList.toggle('ghosted', !!(st.ghost && st.ghost.has(it.id))); // rows rendered mid-drag stay faded (v-3)
+    }
+    keep.add(it.key);
+    nodes.push(el);
+  }
+  if (virtual()) nodes.push(botSp);
+  for (const k of [...els.keys()]) if (!keep.has(k)) els.delete(k);
+  reconcile(box, nodes);
+  if (!virtual()) return;
+  // Measure what is rendered (one read), then correct the cached heights and the spacers (writes).
+  const hs = [];
+  for (let i = a; i < b; i++) { const el = els.get(items[i].key); hs.push(el ? el.offsetHeight : 0); }
+  let changed = false;
+  for (let i = a; i < b; i++) { const v = hs[i - a]; if (v && hcache.get(items[i].key) !== v) { hcache.set(items[i].key, v); changed = true; } }
+  if (changed) computeOffsets();
+  topSp.style.height = offs[a] + 'px';
+  botSp.style.height = (offs[items.length] - offs[b]) + 'px';
+}
 export function renderPage(opts = {}) {
   const r = st.route;
   const key = r.view + ':' + (r.id || '');
   const box = $('#outline');
-  if (chunkJob) { cancelAnimationFrame(chunkJob); chunkJob = 0; }
-  const fresh = key !== pageKey || !els.size;
-  if (key !== pageKey) { els.clear(); box.replaceChildren(); pageKey = key; }
-  const pend = [];
+  if (key !== pageKey) { els.clear(); hcache.clear(); box.replaceChildren(); pageKey = key; }
   const before = opts.flip ? measure() : new Map();
   const active = document.activeElement;
-  const nodes = [];
-  st.rows = []; st.info.clear();
-  const seen = new Set();
-  const pushRow = (id, m, smart) => {
-    st.rows.push(id); st.info.set(id, m); seen.add(id);
-    let el = els.get(id);
-    if (!el && fresh && st.rows.length > FIRST && !smart) { pend.push([id, m]); return; }
-    if (!el) { el = makeRow(id); els.set(id, el); }
-    fillRow(el, id, m, smart);
-    nodes.push(el);
-  };
+  rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 36;
+  st.rows = []; st.info.clear(); items = []; index = new Map();
+  const addRow = (id, m, smart) => { st.rows.push(id); st.info.set(id, m); index.set(id, items.length); items.push({ key: id, id, m, smart }); };
   renderHead();
   if (r.view === 'node' || r.view === 'inbox') {
-    const root = pageRoot();
-    for (const m of outlineRows(root)) pushRow(m.id, m, false);
+    for (const m of outlineRows(pageRoot())) addRow(m.id, m, false);
   } else {
     for (const g of groupsFor(r.view)) {
       if (!g.rows.length) continue;
       if (g.label) {
-        const gk = 'g:' + g.key;
-        let ge = els.get(gk);
-        if (!ge) {
-          ge = h('div', { class: 'grp', role: 'presentation' });
-          els.set(gk, ge);
-        }
         const lab = typeof g.label === 'string'
           ? `<span class="gl">${g.icon || ''}${esc(g.label)}</span>`
           : `<span class="gn">${g.label.big}</span><span class="gl">${esc(g.label.small)}</span>`;
-        if (ge._h !== lab) { ge.innerHTML = lab; ge._h = lab; }
-        nodes.push(ge); seen.add(gk);
+        items.push({ key: 'g:' + g.key, grp: true, lab });
       }
-      for (const id of g.rows) pushRow(id, { depth: 0, parent: S.parentOf(id), date: g.date || null }, true);
+      g.rows.forEach((id, i) => addRow(id, { depth: 0, parent: S.parentOf(id), date: g.date || null, pos: i + 1, size: g.rows.length }, true));
     }
   }
-  for (const k of [...els.keys()]) if (!seen.has(k)) els.delete(k);
-  reconcile(box, nodes);
-  pendQ = pend; pendBox = box;
-  if (pend.length) {
-    const step = () => {
-      const part = pend.splice(0, CHUNK), frag = document.createDocumentFragment();
-      for (const [id, m] of part) { const el = makeRow(id); els.set(id, el); fillRow(el, id, m, false); frag.append(el); }
-      box.append(frag);
-      chunkJob = pend.length ? requestAnimationFrame(step) : 0;
-      if (!pend.length) queueStrikes();
-    };
-    chunkJob = requestAnimationFrame(step);
-  }
+  computeOffsets();
+  renderWindow(withCursor(viewWindow()));
   // Roving tabindex: exactly one row is a Tab stop (the cursor, else the first row).
-  const stopId = st.cursor && st.rows.includes(st.cursor) ? st.cursor : st.rows[0];
+  const stopId = st.cursor && index.has(st.cursor) ? st.cursor : st.rows[0];
   for (const el of box.querySelectorAll('.row[tabindex="0"]')) if (el.dataset.id !== stopId) el.tabIndex = -1;
   const stop = stopId && els.get(stopId); if (stop) stop.tabIndex = 0;
   if (active && active.isConnected && document.activeElement !== active && active !== document.body) active.focus({ preventScroll: true });

@@ -329,7 +329,15 @@ let orderCache = null;
 export function order() {
   if (orderCache) return orderCache;
   const m = new Map(); let i = 0;
-  const walk = (p) => { for (const c of children(p)) { m.set(c, i++); walk(c); } };
+  // Allocation-free, like treeStats(): this runs after every structural change on lists of any size.
+  const walk = (p) => {
+    const arr = kids.get(p);
+    if (arr) for (let k = 0; k < arr.length; k++) {
+      const c = arr[k], r = recs.get(c);
+      if (!r || (r.f.deleted && r.f.deleted[0])) continue;
+      m.set(c, i++); walk(c);
+    }
+  };
   walk(ROOT);
   return (orderCache = m);
 }

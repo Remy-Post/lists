@@ -63,7 +63,9 @@ ui.settings = async () => {
       ui.install ? h('div', { class: 'acts' }, h('button', { class: 'btn primary', onclick: () => { ui.install(); draw(); } }, 'Install Lists as an app')) : null,
       h('h3', null, 'Help'),
       h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: () => { close(entry); ui.cheat(); } }, 'Keyboard shortcuts'), h('button', { class: 'btn', onclick: () => { close(entry); ui.tutorial && ui.tutorial(); } }, 'Add the tour to Today')),
-      h('p', { class: 'muted small' }, `Lists ${window.LISTS_VERSION || ''} · ${S.recs.size} records · open source`),
+      h('p', { class: 'muted small' }, `Lists ${window.LISTS_VERSION || ''}, ${S.recs.size} records. Open source.`),
+      // Device facts for tuning the two target layouts (PLAN §10): read them off the real phone and Mac.
+      h('p', { class: 'muted small', id: 'devinfo' }, `This device: ${innerWidth}×${innerHeight} CSS px, screen ${screen.width}×${screen.height}, ${devicePixelRatio}× pixels${matchMedia('(color-gamut: p3)').matches ? ', P3 colour' : ''}${navigator.connection ? ', ' + (navigator.connection.type || navigator.connection.effectiveType) : ''}.`),
     );
   };
   draw();

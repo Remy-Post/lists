@@ -2,7 +2,7 @@
 import * as S from './store.js';
 import * as A from './actions.js';
 import { st, $, h, haptic, pageRoot } from './state.js';
-import { renderPage, renderSide, rowEl } from './view.js';
+import { renderPage, renderSide, rowEl, peekRow } from './view.js';
 import { focusRow } from './input.js';
 import { ui } from './ui.js';
 
@@ -84,10 +84,11 @@ function start(d, x, y) {
   const hidden = new Set(sel);
   for (const id of sel) for (const c of S.descendants(id)) hidden.add(c);
   d.hidden = hidden;
+  st.ghost = hidden;
   d.cands = st.rows.filter((id) => !hidden.has(id));
   d.depth0 = st.info.get(d.id)?.depth || 0;
   d.outline = !!pageRoot() && (st.route.view === 'node' || st.route.view === 'inbox');
-  for (const id of hidden) rowEl(id)?.classList.add('ghosted');
+  for (const id of hidden) peekRow(id)?.classList.add('ghosted');
   const r = d.row.getBoundingClientRect();
   d.dx = x - r.left; d.dy = y - r.top;
   const g = d.row.cloneNode(true);
@@ -110,12 +111,15 @@ function track(d, x, y) {
   if (dest || !d.outline) { d.line.hidden = true; d.target = null; autoscroll(y); return; }
   d.line.hidden = false;
   // Gap under the pointer.
-  let i = d.cands.length;
+  // Only rendered rows can be under the pointer (long pages are virtualized; autoscroll brings more in).
+  let i = -1, lastSeen = -1;
   for (let k = 0; k < d.cands.length; k++) {
-    const el = rowEl(d.cands[k]); if (!el) continue;
+    const el = peekRow(d.cands[k]); if (!el) continue;
+    lastSeen = k;
     const b = el.getBoundingClientRect();
     if (y < b.top + b.height / 2) { i = k; break; }
   }
+  if (i < 0) i = lastSeen + 1;
   const prev = d.cands[i - 1], next = d.cands[i];
   const dep = (id) => st.info.get(id)?.depth || 0;
   const maxD = prev ? dep(prev) + 1 : 0, minD = next ? dep(next) : 0;
@@ -123,8 +127,9 @@ function track(d, x, y) {
   const depth = Math.max(minD, Math.min(maxD, want));
   d.target = resolve(prev, depth);
   const ob = $('#outline').getBoundingClientRect();
-  const ref = prev ? rowEl(prev).getBoundingClientRect() : next ? rowEl(next).getBoundingClientRect() : ob;
-  const ly = prev ? ref.bottom : ref.top;
+  const pe = prev && peekRow(prev), ne = next && peekRow(next);
+  const ref = pe ? pe.getBoundingClientRect() : ne ? ne.getBoundingClientRect() : ob;
+  const ly = pe ? ref.bottom : ref.top;
   d.line.style.transform = `translate(${depth * INDENT()}px, ${ly - ob.top - 1}px)`;
   autoscroll(y);
 }
@@ -151,8 +156,9 @@ function finish(d) {
   cancelAnimationFrame(scrollRaf);
   d.ghost && d.ghost.remove(); d.line && d.line.remove();
   d.dest && d.dest.classList.remove('drop-on');
-  for (const id of d.hidden || []) rowEl(id)?.classList.remove('ghosted');
+  for (const id of d.hidden || []) peekRow(id)?.classList.remove('ghosted');
   document.body.classList.remove('dragging');
+  st.ghost = null;
   drag = null;
 }
 function onUp(d, e) {
@@ -171,7 +177,7 @@ function onUp(d, e) {
     st.collapsed.delete(t.parent);
   }
   renderPage({ flip: true }); renderSide();
-  if (rowEl(ids[0])) focusRow(ids[0], { scroll: false });
+  if (peekRow(ids[0])) focusRow(ids[0], { scroll: false });
   haptic(6);
 }
 function abort(d) {
