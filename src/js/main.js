@@ -36,14 +36,17 @@ DB.onMeta((k, v) => { if (bc && (k.startsWith('sync.') || SHARED_META.has(k))) b
 DB.onDiskNewer((list) => mergeQuiet(list));
 
 /* ---------------- render scheduling ---------------- */
-let raf = 0, flipNext = false;
-function schedule(flip) {
+let raf = 0, flipNext = false, reuseNext = true;
+// Fields whose change can't alter which rows an outline page shows (see renderPage's reuse path).
+const ROW_STABLE = new Set(['title', 'notes', 'done', 'doneAt', 'when', 'deadline', 'evening', 'someday', 'time', 'priority', 'tags', 'rrule', 'repeatFrom', 'heading']);
+function schedule(flip, fields) {
   flipNext ||= flip;
+  reuseNext &&= !flip && !!fields && [...fields].every((f) => ROW_STABLE.has(f));
   if (raf) return;
   raf = requestAnimationFrame(() => {
     raf = 0;
-    const f = flipNext; flipNext = false;
-    renderPage({ flip: f }); renderSide(); ui.refreshInsp();
+    const f = flipNext, reuse = reuseNext; flipNext = false; reuseNext = true;
+    renderPage({ flip: f, reuse }); renderSide(); ui.refreshInsp();
     checkCleared();
   });
 }
@@ -53,7 +56,7 @@ S.subscribe((ids, structural, fields) => {
     const id = [...ids][0];
     if (peekRow(id) && peekRow(id).isConnected) { refillRow(id); if (S.parentOf(id) === S.ROOT) renderSide(); return; }
   }
-  schedule(structural);
+  schedule(structural, fields);
 });
 
 /* ---------------- routing ---------------- */

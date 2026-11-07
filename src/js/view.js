@@ -322,7 +322,8 @@ function reconcile(box, nodes) {
 }
 function measure() {
   const m = new Map();
-  if (st.reduced) return m;
+  // FLIP costs a forced layout before every structural change; weak hardware skips it and rows snap.
+  if (st.reduced || st.lowEnd) return m;
   const vh = innerHeight;
   for (const [id, el] of els) {
     if (!el.isConnected) continue;
@@ -417,6 +418,17 @@ export function renderPage(opts = {}) {
   const before = opts.flip ? measure() : new Map();
   const active = document.activeElement;
   rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 36;
+  // A non-structural edit on an outline page (completing, renaming, dating) can't change which rows show:
+  // today's completions stay in place. Reuse the row model instead of rebuilding all of it.
+  const outline = r.view === 'node' || r.view === 'inbox';
+  if (opts.reuse && !fresh && outline && items.length && lastToday === today()) {
+    renderHead();
+    renderWindow(withCursor(viewWindow()));
+    const a = document.activeElement;
+    if (active && active.isConnected && a !== active && active !== document.body) active.focus({ preventScroll: true });
+    renderEmpty(); queueStrikes();
+    return;
+  }
   st.rows = []; st.info.clear(); items = []; index = new Map();
   const addRow = (id, m, smart) => { st.rows.push(id); st.info.set(id, m); index.set(id, items.length); items.push({ key: id, id, m, smart }); };
   renderHead();
