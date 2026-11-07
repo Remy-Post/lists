@@ -187,7 +187,8 @@ export function mergeRemote(list) {
 /** Load from disk (no persistence, no events). */
 export function hydrate(list) {
   recs.clear();
-  for (const r of list) { recs.set(r.id, r); for (const k in r.f) observe(r.f[k][1]); }
+  // A record's v is the newest of its field stamps, so observing v alone advances the clock just as far.
+  for (const r of list) { recs.set(r.id, r); if (r.v) observe(r.v); else for (const k in r.f) observe(r.f[k][1]); }
   rebuild();
 }
 
@@ -223,15 +224,17 @@ function rebuild() {
   for (const id of recs.keys()) eff.set(id, rawParent(id));
   // Concurrent moves on two devices can form a cycle neither saw. Break it deterministically:
   // the most recent move in the cycle loses and falls back to its previous parent, then to Inbox.
+  // Linear time: nodes already known to reach ROOT end every later walk early (10k-item boot).
+  const ok = new Set([ROOT]);
   for (const id of recs.keys()) {
     for (let guard = 0; guard < 64; guard++) {
-      const seen = new Set();
+      const path = [], onPath = new Set();
       let cur = id, cyc = null;
-      while (cur !== ROOT) {
-        if (seen.has(cur)) { cyc = cur; break; }
-        seen.add(cur); cur = eff.get(cur) ?? ROOT;
+      while (!ok.has(cur)) {
+        if (onPath.has(cur)) { cyc = cur; break; }
+        onPath.add(cur); path.push(cur); cur = eff.get(cur) ?? ROOT;
       }
-      if (!cyc) break;
+      if (!cyc) { for (const x of path) ok.add(x); break; }
       const ring = []; let c = cyc;
       do { ring.push(c); c = eff.get(c); } while (c !== cyc);
       ring.sort((a, b) => (pstamp(b) > pstamp(a) ? 1 : pstamp(b) < pstamp(a) ? -1 : b > a ? 1 : -1));
@@ -277,13 +280,15 @@ export function doneEff(id) {
 const fv = (r, k) => { const e = r.f[k]; return e ? e[0] : DEF[k]; };
 function treeStats() {
   return memoize('tree', () => {
-    const open = new Map(), items = [];
+    const open = new Map(), items = [], ord = new Map();
+    let seq = 0;
     const walk = (p, doneAbove) => {
       let n = 0;
       const arr = kids.get(p);
       if (arr) for (let i = 0; i < arr.length; i++) {
         const c = arr[i], r = recs.get(c);
         if (!r || fv(r, 'deleted')) continue;
+        ord.set(c, seq++);
         const kind = fv(r, 'kind'), done = fv(r, 'done'), heading = fv(r, 'heading');
         const d = doneAbove || done;
         if (!d && !heading && kind === 'item') items.push(c);
@@ -294,7 +299,7 @@ function treeStats() {
       return n;
     };
     walk(ROOT, false);
-    return { open, items };
+    return { open, items, ord };
   });
 }
 /** Open descendants (any depth): O(1) per call after one walk per store version. */
@@ -326,21 +331,8 @@ function rekey(parent) { // rare: two devices inserted at the same spot with equ
 /* ---------------- Ordering & queries ---------------- */
 let orderCache = null;
 /** Document order of every live node, for stable sorting in smart views. */
-export function order() {
-  if (orderCache) return orderCache;
-  const m = new Map(); let i = 0;
-  // Allocation-free, like treeStats(): this runs after every structural change on lists of any size.
-  const walk = (p) => {
-    const arr = kids.get(p);
-    if (arr) for (let k = 0; k < arr.length; k++) {
-      const c = arr[k], r = recs.get(c);
-      if (!r || (r.f.deleted && r.f.deleted[0])) continue;
-      m.set(c, i++); walk(c);
-    }
-  };
-  walk(ROOT);
-  return (orderCache = m);
-}
+/** Document order of every live node: comes free with the one tree walk per store version. */
+export function order() { return treeStats().ord; }
 const byOrder = (a, b) => (order().get(a) ?? 0) - (order().get(b) ?? 0);
 
 function liveOpenItems() { return treeStats().items; }
@@ -369,9 +361,15 @@ function qTodayRaw(today) {
 }
 /** Items done today that would have been in Today (for the "struck through" view). */
 export function qDoneToday(todayStart) {
-  const out = [];
-  for (const [id] of recs) if (isLive(id) && val(id, 'done') && (val(id, 'doneAt') || 0) >= todayStart && (val(id, 'kind') === 'item' || val(id, 'kind') === 'log')) out.push(id);
-  return out.sort((a, b) => val(a, 'doneAt') - val(b, 'doneAt'));
+  return memoize('doneToday:' + todayStart, () => {
+    // order() holds exactly the live nodes (the tree walk skips deleted subtrees), so no ancestor walks here.
+    const out = [];
+    for (const id of order().keys()) {
+      const r = recs.get(id), k = fv(r, 'kind');
+      if (fv(r, 'done') && (fv(r, 'doneAt') || 0) >= todayStart && (k === 'item' || k === 'log')) out.push(id);
+    }
+    return out.sort((a, b) => val(a, 'doneAt') - val(b, 'doneAt'));
+  });
 }
 export function qUpcoming(today) {
   const m = new Map();
@@ -389,7 +387,7 @@ export function qOverdue(today) {
 }
 export function qLogbook(limit = 400) {
   const out = [];
-  for (const [id] of recs) if (isLive(id) && val(id, 'done') && (val(id, 'kind') === 'item' || val(id, 'kind') === 'log')) out.push(id);
+  for (const id of order().keys()) { const r = recs.get(id), k = fv(r, 'kind'); if (fv(r, 'done') && (k === 'item' || k === 'log')) out.push(id); }
   return out.sort((a, b) => (val(b, 'doneAt') || 0) - (val(a, 'doneAt') || 0)).slice(0, limit);
 }
 export function qTrash() {

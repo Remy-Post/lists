@@ -24,7 +24,7 @@ let pageKey = '';
    past VIRT items the DOM holds only the rows within about a screen of the viewport, between two spacers
    sized from measured (cached) heights. Short pages render in full, so find-in-page and screen readers
    see everything. */
-const VIRT = 300, OVERSCAN = 900;
+const VIRT = 300, OVERSCAN = 600;
 let items = [], index = new Map(), offs = [0], win = [0, 0], rowH = 36;
 const hcache = new Map();
 const topSp = h('div', { class: 'vspace', 'aria-hidden': 'true' });

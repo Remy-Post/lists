@@ -418,6 +418,7 @@ function doRegister() {
 }
 
 /* ---------------- boot ---------------- */
+const yieldTask = () => (globalThis.scheduler && scheduler.yield ? scheduler.yield() : new Promise((r) => setTimeout(r, 0)));
 async function boot() {
   const t0 = performance.now();
   try {
@@ -425,7 +426,9 @@ async function boot() {
     let dev = DB.getMeta('device');
     if (!dev) { dev = Math.random().toString(36).slice(2, 8); DB.setMeta('device', dev); }
     S.setDevice(dev);
+    await yieldTask(); // let the browser breathe between loading, building the tree and the first render
     S.hydrate(nodes);
+    await yieldTask();
   } catch (e) {
     storageBroken = true;
     console.error('Storage unavailable', e);
