@@ -272,25 +272,33 @@ export function doneEff(id) {
   for (let c = id; c && c !== ROOT; c = eff.get(c)) if (val(c, 'done')) return true;
   return false;
 }
-/** Open descendants (any depth). One O(n) pass per store version, then O(1) per call. */
-export function countOpen(id) {
-  const m = memoize('open', () => {
-    const out = new Map();
-    const walk = (p) => {
+/* One allocation-free walk per store version gives both the open count under every node and the list of
+   open items for the smart views (it used to be two walks with filtered arrays at every level). */
+const fv = (r, k) => { const e = r.f[k]; return e ? e[0] : DEF[k]; };
+function treeStats() {
+  return memoize('tree', () => {
+    const open = new Map(), items = [];
+    const walk = (p, doneAbove) => {
       let n = 0;
-      for (const c of children(p)) {
-        if (val(c, 'kind') === 'log') continue;
-        const sub = walk(c);
-        n += sub + (!val(c, 'done') && !val(c, 'heading') ? 1 : 0);
+      const arr = kids.get(p);
+      if (arr) for (let i = 0; i < arr.length; i++) {
+        const c = arr[i], r = recs.get(c);
+        if (!r || fv(r, 'deleted')) continue;
+        const kind = fv(r, 'kind'), done = fv(r, 'done'), heading = fv(r, 'heading');
+        const d = doneAbove || done;
+        if (!d && !heading && kind === 'item') items.push(c);
+        const sub = walk(c, d);
+        if (kind !== 'log') n += sub + (!done && !heading ? 1 : 0);
       }
-      out.set(p, n);
+      open.set(p, n);
       return n;
     };
-    walk(ROOT);
-    return out;
+    walk(ROOT, false);
+    return { open, items };
   });
-  return m.get(id) || 0;
 }
+/** Open descendants (any depth): O(1) per call after one walk per store version. */
+export function countOpen(id) { return treeStats().open.get(id) || 0; }
 export function descendants(id, out = []) { for (const c of children(id)) { out.push(c); descendants(c, out); } return out; }
 
 /** Position for inserting into `parent` between siblings `before` and `after` (ids or null). */
@@ -327,7 +335,7 @@ export function order() {
 }
 const byOrder = (a, b) => (order().get(a) ?? 0) - (order().get(b) ?? 0);
 
-function liveOpenItems() { return memoize('open-items', liveOpenItemsRaw); }
+function liveOpenItems() { return treeStats().items; }
 function liveOpenItemsRaw() {
   const out = [];
   const walk = (p, doneAbove) => {

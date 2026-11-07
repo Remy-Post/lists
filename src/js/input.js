@@ -66,7 +66,11 @@ export function focusRow(id, o = {}) {
     if (document.activeElement !== el) el.focus({ preventScroll: true });
     st.mode = 'nav';
   }
-  if (o.scroll !== false) el.scrollIntoView({ block: 'nearest', behavior: st.reduced || o.instant ? 'auto' : 'smooth' });
+  if (o.scroll !== false) {
+    // Nearby moves glide; long jumps (reveal, zoom-out to a deep row) land instantly.
+    const r = el.getBoundingClientRect(), far = r.top < -innerHeight || r.bottom > innerHeight * 2;
+    el.scrollIntoView({ block: far ? 'center' : 'nearest', behavior: st.reduced || o.instant || far ? 'auto' : 'smooth' });
+  }
   ui.follow(id);
 }
 export function paintSel() {
@@ -134,7 +138,7 @@ function backspaceAtStart(id, tx) {
   // Join only in outlines, and only with the row right above in the tree (req-outline-05).
   const outline = st.route.view === 'node' || st.route.view === 'inbox';
   // Tree-adjacent: the row above is the parent, the previous sibling, or the last visible descendant of it.
-  const sib = S.children(S.parentOf(id)), before = sib[sib.indexOf(id) - 1];
+  const sib = S.children(S.parentOf(id)).filter((x) => x === id || A.visible(x)), before = sib[sib.indexOf(id) - 1];
   const adj = !!prev && (prev === S.parentOf(id) || prev === before || (!!before && S.ancestors(prev).includes(before)));
   if (!outline || !adj || !prev || S.hasChildren(id) || S.val(prev, 'kind') !== 'item' || hasContent(id)) return false;
   const pt = S.val(prev, 'title');

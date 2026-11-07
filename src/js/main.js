@@ -29,9 +29,10 @@ if (bc) bc.onmessage = (e) => {
   const d = e.data;
   if (!d) return;
   if (d.t === 'rec') { if (!inbox.length) queueMicrotask(() => mergeQuiet(inbox.splice(0))); inbox.push(d.r); }
-  else if (d.t === 'meta') DB.mirrorMeta(d.k, d.v);
+  else if (d.t === 'meta') { DB.mirrorMeta(d.k, d.v); if (d.k === 'sync.sync' && d.v && d.v.key) loadSync().then(() => maybeSync('paired')).catch(() => {}); }
 };
-DB.onMeta((k, v) => { if (bc && k.startsWith('sync.')) bc.postMessage({ t: 'meta', k, v }); });
+const SHARED_META = new Set(['syncEvery', 'backupDays']);
+DB.onMeta((k, v) => { if (bc && (k.startsWith('sync.') || SHARED_META.has(k))) bc.postMessage({ t: 'meta', k, v }); });
 DB.onDiskNewer((list) => mergeQuiet(list));
 
 /* ---------------- render scheduling ---------------- */
@@ -79,20 +80,28 @@ function show(r, kind, fromRow) {
   st.route = { view: r.view, id: r.id };
   if (!same) { st.sel.clear(); st.cursor = null; st.mode = 'nav'; if (!matchMedia('(min-width: 1440px)').matches) ui.closeInsp(); }
   DB.setMeta('lastView', r.view === 'node' ? 'today' : r.view);
-  const deeper = r.view === 'node' && (prev.view !== 'node' || S.ancestors(r.id).includes(prev.id));
-  const shallower = prev.view === 'node' && (r.view !== 'node' || S.ancestors(prev.id).includes(r.id));
-  const doRender = () => { renderPage(); renderSide(); };
+  // Only a real zoom (into a row, or along one branch of the tree) animates; switching views or lists
+  // from the sidebar renders at once, so no tap is ever swallowed by a transition (review platform-5).
+  const deeper = r.view === 'node' && (!!fromRow || (prev.view === 'node' && S.ancestors(r.id).includes(prev.id)));
+  const shallower = !deeper && prev.view === 'node' && r.view === 'node' && S.ancestors(prev.id).includes(r.id);
+  const doRender = () => {
+    renderPage(); renderSide();
+    // Land keyboard focus in the new page, including after a mouse click in the sidebar or a palette jump,
+    // so single-key shortcuts keep working (a11y-09, review interaction-2). Then announce what rendered.
+    const a = document.activeElement, m = $('#main');
+    if (!st.touch && m && (!a || a === document.body || !a.isConnected || a.closest('#side, .topbar, #searchBtn, #moreBtn'))) m.focus({ preventScroll: true });
+    announce(r);
+  };
   if (same) { doRender(); return; }
+  // Measure the clicked row before scrolling, so the zoom opens from where the row was (review platform-3).
+  const root = document.documentElement;
+  if (fromRow) { const b = fromRow.getBoundingClientRect(); root.style.setProperty('--vt-y', Math.min(innerHeight - 40, Math.max(0, b.top)) + 'px'); root.style.setProperty('--vt-h', b.height + 'px'); }
+  else { root.style.removeProperty('--vt-y'); root.style.removeProperty('--vt-h'); }
   scrollTo({ top: 0 }); // before rendering: scrolling after forced a full layout of the new page (QA B2)
-  // Move focus to the page (not a row) so keyboard users land in the new context (a11y-09).
-  queueMicrotask(() => { const m = $('#main'); if (!st.touch && m && (document.activeElement === document.body || !document.activeElement || !document.activeElement.isConnected)) m.focus({ preventScroll: true }); announce(r); });
   if (r.view !== 'today' && light) { light.destroy(); light = null; }
   // Zoom: the new sheet opens out of the clicked row, and that row's title becomes the page title.
   // Exactly one element carries 'ztitle' in each state (visual audit S2-1).
   const t = fromRow && kind === 'pointer' ? fromRow.querySelector('.tx') : null;
-  const root = document.documentElement;
-  if (fromRow) { const b = fromRow.getBoundingClientRect(); root.style.setProperty('--vt-y', Math.max(0, b.top) + 'px'); root.style.setProperty('--vt-h', b.height + 'px'); }
-  else { root.style.removeProperty('--vt-y'); root.style.removeProperty('--vt-h'); }
   const pt = $('#ptitle');
   pt.style.viewTransitionName = '';
   if (t) t.style.viewTransitionName = 'ztitle';
@@ -103,7 +112,7 @@ function show(r, kind, fromRow) {
     doRender();
   }, kind === 'key' || !(deeper || shallower) ? 'key' : 'nav'); // list switches render instantly (QA B7)
   setTimeout(() => { pt.style.viewTransitionName = ''; }, 700);
-  if (st.touch) closeDrawer();
+  closeDrawer(); // no-op when closed; also covers a narrow window driven by a mouse (review platform-6)
 }
 ui.go = (r, kind = 'pointer', fromRow) => {
   const target = hashOf(r);
@@ -119,7 +128,8 @@ addEventListener('hashchange', () => { const r = parseHash(); if (r.pair) return
 let sync = null, syncStatus = { state: 'unpaired' }, syncLoading = null;
 const syncMeta = () => DB.getMeta('sync.sync') || {};
 const isPaired = () => !!syncMeta().key;
-const loadSync = () => (syncLoading ||= import('./sync.js').then((m) => { setupSync(m.createSync); return sync; }));
+// A failed chunk load is forgotten, so the next attempt fetches again (review platform-2).
+const loadSync = () => (syncLoading ||= import('./sync.js').then((m) => { if (!sync) setupSync(m.createSync); paintSync(); return sync; }, (e) => { syncLoading = null; throw e; }));
 function setupSync(createSync) {
   sync = createSync({
     db: {
@@ -153,7 +163,7 @@ function paintSync() {
 ui.syncState = () => syncStatus;
 ui.syncNow = async () => {
   if (!isPaired()) { ui.settings(); return; }
-  await loadSync();
+  try { await loadSync(); } catch { ui.toast('Couldn’t load sync. Check your connection.'); return; }
   ui.toast('Syncing…', { ms: 1200 });
   const ok = await sync.syncNow().catch(() => false);
   ui.toast(ok ? 'Synced' : navigator.onLine ? 'Sync failed. It will retry on a good connection.' : 'You’re offline. Changes are saved here and will sync later.');
@@ -190,7 +200,12 @@ async function pairFromLink(code) {
 }
 const clearPending = () => { try { sessionStorage.removeItem('lists.pair'); } catch {} };
 const pendingPair = () => { try { return sessionStorage.getItem('lists.pair'); } catch { return null; } };
-const maybeSync = (why) => { try { sync && sync.maybeSync(why); } catch {} };
+const maybeSync = (why) => {
+  try {
+    if (sync) sync.maybeSync(why);
+    else if (isPaired()) loadSync().then((s) => s.maybeSync(why)).catch(() => {}); // paired in another tab (review platform-1)
+  } catch {}
+};
 
 /* ---------------- the moment: Today, struck through ---------------- */
 let wasOpen = null, forcedClear = false;
@@ -270,6 +285,7 @@ function syncDrawer() { const open = document.body.classList.contains('drawer');
 function openDrawer() { document.body.classList.add('drawer'); syncDrawer(); const f = $('#side .nv'); f && f.focus({ preventScroll: true }); }
 function closeDrawer() { const was = document.body.classList.contains('drawer'); document.body.classList.remove('drawer'); syncDrawer(); if (was && phoneMQ.matches && $('#side').contains(document.activeElement)) $('#menuBtn').focus({ preventScroll: true }); }
 phoneMQ.addEventListener?.('change', syncDrawer);
+ui.closeDrawer = () => closeDrawer();
 
 /* ---------------- chrome wiring ---------------- */
 function wireChrome() {

@@ -173,7 +173,7 @@ function fillInsp(id) {
     if (!txt) { save({ rrule: null }); return; }
     const p = parseQuick('x ' + (/^(every|after)/i.test(txt) ? txt : 'every ' + txt));
     const explicit = /every!|^after/i.test(txt);
-    if (p.rrule) { save({ rrule: p.rrule, repeatFrom: explicit ? p.repeatFrom : v('repeatFrom') || 'when', ...(v('when') ? {} : { when: p.when }) }); repeat.value = safe(() => describeRRule(p.rrule)); fillInsp(id); }
+    if (p.rrule) { save({ rrule: p.rrule, repeatFrom: explicit ? p.repeatFrom : v('repeatFrom') || 'when', ...(v('when') ? {} : { when: p.when }) }); repeat.value = safe(() => describeRRule(p.rrule)); setTimeout(() => insp && insp.id === id && !insp.el.contains(document.activeElement) && fillInsp(id), 250); }
     else { repeat.value = v('rrule') ? safe(() => describeRRule(v('rrule'))) : ''; ui.toast('Try “every monday” or “every! 3 days”'); }
   });
   const pri = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Priority' },
@@ -220,7 +220,8 @@ ui.datePicker = (ids, mode, anchor) => {
   const head = h('div', { class: 'dp-head' });
   const pick = (d, o = {}) => {
     if (mode === 'when') A.setWhen(ids, d, o); else A.setDeadline(ids, d);
-    close(entry); renderPage({ flip: true }); renderSide(); ui.refreshInsp();
+    close(entry); renderPage({ flip: true }); renderSide();
+    if (insp && ids.includes(insp.id)) fillInsp(insp.id); else ui.refreshInsp();
     haptic(6);
     if (d && mode === 'when') ui.toast((ids.length > 1 ? `${ids.length} items → ` : '') + (o.evening ? 'This evening' : formatDay(d, new Date())), { undo: true });
   };
@@ -310,7 +311,7 @@ ui.compose = (at) => {
   ta.addEventListener('click', () => {
     const c = ta.selectionStart;
     const p = parseQuick(ta.value, new Date(), { ignore });
-    const t = (p.tokens || []).find((x) => c >= x.start && c <= x.end);
+    const t = ta.selectionStart === ta.selectionEnd && (p.tokens || []).find((x) => c > x.start && c < x.end);
     if (t) { ignore.push([t.start, t.end]); draw(); }
   });
   ta.addEventListener('paste', (e) => {
@@ -318,13 +319,14 @@ ui.compose = (at) => {
     if (!/\n/.test(text.trim())) return;
     // Many lines: an outline, not a title (req-outline-04).
     e.preventDefault();
-    const ids = A.pasteOutline(text, target.parent, target.index ?? S.children(target.parent).length, target.fields || {});
+    const ids = A.pasteOutline(text, target.parent, at && at.index != null ? at.index : S.children(target.parent).length, target.fields || {});
     close(entry); renderPage({ flip: true }); renderSide();
     ui.toast(`Added ${ids.length} items`, { undo: true });
   });
   const submit = (closeAfter) => {
     if (!ta.value.trim()) { close(entry); return; }
-    const id = A.quickAdd(ta.value, target, ignore);
+    const id = A.quickAdd(ta.value, { ...target, index: at && at.index != null ? at.index : S.children(target.parent).length }, ignore);
+    if (id && at && at.index != null) at.index++;
     if (id) { haptic(6); renderPage({ flip: true }); renderSide(); ui.toast('Added', { undo: true, ms: 1800 }); }
     ta.value = ''; prevVal = ''; ignore = []; DB.setMeta('draft', ''); draw();
     if (closeAfter) close(entry); else ta.focus();
@@ -497,6 +499,7 @@ ui.escape = () => {
   if (closeTop()) return;
   if (st.sel.size > 1) { st.sel = new Set(st.cursor ? [st.cursor] : []); renderPage(); return; }
   if (ui.closeInsp()) return;
+  if (document.body.classList.contains('drawer') && ui.closeDrawer) { ui.closeDrawer(); return; }
   // Release the selection entirely so Tab can leave the list (audit S2-3).
   if (st.sel.size || st.cursor) { st.sel.clear(); renderPage(); const a = document.activeElement; if (a && a.closest && a.closest('#outline')) a.blur(); }
 };

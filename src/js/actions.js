@@ -341,7 +341,7 @@ export function importMarkdown(text, fallbackTitle) {
   const made = [];
   O.tx('Import', () => {
     for (const b of blocks) {
-      if (!b.lines.some((l) => l.trim())) continue;
+      if (!b.lines.some((l) => l.trim()) && b.title === (fallbackTitle || 'Imported')) continue;
       const list = O.create({ title: b.title, pos: S.posAt(S.ROOT, S.children(S.ROOT).length) });
       made.push(list);
       // Pull notes ("> …") and date comments off before outline parsing, keyed by the item line they follow.

@@ -134,14 +134,14 @@ function makeRow(id) {
 
 /** Everything a row's appearance depends on; if unchanged, the DOM is already right. */
 function sigOf(id, m, smart) {
-  return S.rev(id) + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
+  return S.rev(id) + '|' + (m.date || '') + '|' + (m.depth || 0) + '|' + (smart ? 1 : 0) + '|' + st.route.view + '|' + today() + '|' +
     (st.collapsed.has(id) ? 1 : 0) + (st.sel.has(id) ? 1 : 0) + (st.cursor === id ? 1 : 0) + '|' + (S.hasChildren(id) ? S.countOpen(id) : -1) + '|' + (smart ? S.ancestors(id).map((a) => S.rev(a) + S.val(a, 'title')).join() : '') + '|' + (st.rows[0] === id ? 1 : 0);
 }
 export function fillRow(el, id, m, smart) {
   const sig = sigOf(id, m, smart);
   if (el._sig === sig && document.activeElement !== el._tx) return;
   el._sig = sig;
-  if (el._done && S.val(id, 'done')) strikeDirty.add(id); // refilled done row: re-measure its strike
+  if (el._done && S.val(id, 'done')) el._drawn = false; // refilled done row: re-measure when near the viewport
   const done = S.val(id, 'done'), heading = S.val(id, 'heading');
   const kidsN = S.hasChildren(id);
   const collapsed = st.collapsed.has(id);
@@ -185,7 +185,7 @@ export function fillRow(el, id, m, smart) {
   const bits = [];
   const w = S.val(id, 'when'), dl = S.val(id, 'deadline');
   const inToday = st.route.view === 'today';
-  const inUpcomingDay = st.route.view === 'upcoming' && w && w > t && w <= addDaysYMD(t, 7);
+  const inUpcomingDay = st.route.view === 'upcoming' && w && m.date === w;
   if (w && !(inToday && w === t) && !inUpcomingDay) {
     if (w < t && !done) bits.push(`<span class="chip since">${inToday ? 'since ' : ''}${formatDay(w, new Date())}</span>`);
     else if (!(inToday)) bits.push(`<span class="chip when">${formatDay(w, new Date())}${S.val(id, 'evening') ? ' ' + ICON.moon : ''}</span>`);
@@ -211,8 +211,8 @@ export function fillRow(el, id, m, smart) {
   ct.textContent = kidsN ? (n ? String(n) : '✓') : '';
   ct.hidden = !kidsN;
   // strike bookkeeping: new done rows draw when they scroll into view; a fresh completion draws now.
-  if (done && !el._done) { if (el._done === undefined) { el._strikeQ = 'static'; strikeIO.observe(el); } else { el._strikeQ = 'anim'; strikeDirty.add(id); } }
-  if (!done && el._done) { el._strikeQ = null; const sv = el.querySelector('.tl > svg.strike'); if (sv) sv.remove(); }
+  if (done && !el._done) { if (el._done === undefined) el._strikeQ = 'static'; else { el._strikeQ = 'anim'; strikeDirty.add(id); } el._drawn = false; }
+  if (!done && el._done) { el._strikeQ = null; el._drawn = false; const sv = el.querySelector('.tl > svg.strike'); if (sv) sv.remove(); }
   el._done = !!done;
 }
 /** Re-fill one rendered row in place (the typing fast path). */
@@ -225,21 +225,29 @@ export function refillRow(id) {
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const safeDescribe = (r) => { try { return describeRRule(r); } catch { return 'Repeats'; } };
 
-/* Strikes: rows queue themselves (strikeDirty) or wait to scroll into view (strikeIO). Every flush is
+/* Strikes: rows queue themselves (strikeDirty) or are picked up when near the viewport. Every flush is
    two strict phases, all reads then all writes, so a long list never thrashes layout (QA perf). */
 const strikeDirty = new Set();
-const strikeIO = new IntersectionObserver((entries) => {
-  let any = false;
-  for (const e of entries) {
-    if (!e.isIntersecting) continue;
-    strikeIO.unobserve(e.target);
-    const id = e.target.dataset.id;
-    if (id && els.get(id) === e.target) { strikeDirty.add(id); any = true; }
+/** Done rows near the viewport that still need a strike: a binary search over row offsets, so the cost
+    doesn't grow with the length of the list (an IntersectionObserver on every done row did). */
+function nearDoneRows() {
+  const box = document.getElementById('outline'), kids = box.children, n = kids.length;
+  if (!n) return [];
+  const top = -box.getBoundingClientRect().top - 400, bottom = top + innerHeight + 800;
+  let lo = 0, hi = n;
+  while (lo < hi) { const m = (lo + hi) >> 1; const k = kids[m]; if (k.offsetTop + k.offsetHeight < top) lo = m + 1; else hi = m; }
+  const out = [];
+  for (let i = lo; i < n; i++) {
+    const k = kids[i];
+    if (k.offsetTop > bottom) break;
+    if (k._done && !k._drawn && k.dataset.id) out.push(k.dataset.id);
   }
-  if (any) queueStrikes();
-}, { rootMargin: '300px 0px' });
+  return out;
+}
+let scrollRaf = 0;
+addEventListener('scroll', () => { if (!scrollRaf) scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; queueStrikes(); }); }, { passive: true });
 function flushStrikes() {
-  const ids = [...strikeDirty];
+  const ids = [...new Set([...strikeDirty, ...nearDoneRows()])];
   strikeDirty.clear();
   const work = [];
   for (const id of ids) {
@@ -249,13 +257,14 @@ function flushStrikes() {
     const anim = el._strikeQ === 'anim';
     if (anim) el._tx.style.transition = 'none'; // measure the condensed title, not a mid-transition one
     const geo = measureStrike(tl, el._tx);
-    if (!geo) { strikeIO.observe(el); continue; }
+    if (!geo) continue;
     work.push([id, el, tl, geo, anim]);
   }
   const fast = performance.now() - (st.keyAt || 0) < 400;
   for (const [id, el, tl, geo, anim] of work) {
     el._strikeQ = null;
     el._sw = geo.w;
+    el._drawn = true;
     // The pencil leads; on the keyboard path it draws in 90 ms (visual audit S2-2).
     paintStrike(tl, geo, id, anim && !st.reduced ? (fast ? 'fast' : 'full') : false);
     if (anim) {
@@ -271,8 +280,9 @@ new ResizeObserver((e) => {
   const w = Math.round(e[0].contentRect.width);
   if (w === lastW) return; // only width changes can re-wrap titles
   lastW = w;
-  // Titles may re-wrap: re-measure done rows as they come into view.
-  for (const el of els.values()) if (el._done) { strikeIO.unobserve(el); strikeIO.observe(el); }
+  // Titles may re-wrap: every done row re-measures when it is next near the viewport.
+  for (const el of els.values()) if (el._done) el._drawn = false;
+  queueStrikes();
 }).observe(document.documentElement);
 
 /* ---------------- reconcile + FLIP ---------------- */
@@ -310,7 +320,7 @@ function play(before) {
 let lastToday = '';
 // A fresh page paints its first rows at once and streams the rest in per-frame chunks, so opening a
 // 1,000-row list never blocks the main thread (QA perf gate: no long task > 50 ms).
-const FIRST = 90, CHUNK = 120;
+const FIRST = 48, CHUNK = 60; // ~1.5 screens first; then small slices that fit inside a frame
 let chunkJob = 0;
 export function renderPage(opts = {}) {
   const r = st.route;
@@ -353,7 +363,7 @@ export function renderPage(opts = {}) {
         if (ge._h !== lab) { ge.innerHTML = lab; ge._h = lab; }
         nodes.push(ge); seen.add(gk);
       }
-      for (const id of g.rows) pushRow(id, { depth: 0, parent: S.parentOf(id) }, true);
+      for (const id of g.rows) pushRow(id, { depth: 0, parent: S.parentOf(id), date: g.date || null }, true);
     }
   }
   for (const k of [...els.keys()]) if (!seen.has(k)) els.delete(k);
@@ -370,7 +380,9 @@ export function renderPage(opts = {}) {
     chunkJob = requestAnimationFrame(step);
   }
   // Roving tabindex: exactly one row is a Tab stop (the cursor, else the first row).
-  if (!st.cursor || !st.rows.includes(st.cursor)) { const f = st.rows[0] && els.get(st.rows[0]); if (f) f.tabIndex = 0; }
+  const stopId = st.cursor && st.rows.includes(st.cursor) ? st.cursor : st.rows[0];
+  for (const el of box.querySelectorAll('.row[tabindex="0"]')) if (el.dataset.id !== stopId) el.tabIndex = -1;
+  const stop = stopId && els.get(stopId); if (stop) stop.tabIndex = 0;
   if (active && active.isConnected && document.activeElement !== active && active !== document.body) active.focus({ preventScroll: true });
   renderEmpty();
   play(before);
@@ -411,8 +423,9 @@ function renderHead() {
   const n = Math.min(depth, 6);
   if (stack.childElementCount !== n) stack.replaceChildren(...Array.from({ length: n }, () => h('i')));
   stack.dataset.more = depth > 6 ? String(depth) : '';
-  document.body.dataset.view = r.view;
-  document.body.dataset.depth = String(depth);
+  // Only write when changed: body attributes feed selectors, and every write restyles every row (QA 10k perf).
+  if (document.body.dataset.view !== r.view) document.body.dataset.view = r.view;
+  if (document.body.dataset.depth !== String(depth)) document.body.dataset.depth = String(depth);
 }
 
 function renderEmpty() {
