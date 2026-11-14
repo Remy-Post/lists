@@ -388,6 +388,8 @@ test('formatDay', () => {
   eq(formatDay('2027-11-14', NOW), 'Nov 14, 2027')
   eq(formatDay('2027-01-01', at(2026, 12, 30)), 'Fri')
   eq(formatDay(null, NOW), '')
+  // A bad synced value (an AI writing words where a date goes) renders as nothing instead of breaking the row.
+  for (const bad of ['next tuesday', '2026-13-40', '2026-11', 'Fri', 42, {}, undefined]) eq(formatDay(bad, NOW), '', String(bad))
 })
 
 test('parseDate (whole-string date field)', () => {
@@ -422,4 +424,11 @@ test('suggestDates prefix completion', () => {
   assert.ok(t.length <= 8)
   de(s(''), [])
   de(s('xyz'), [])
+})
+
+test('nextOccurrence: a rule it cannot read gives null, never a throw (audit c7 t5)', () => {
+  eq(nextOccurrence('garbage', '2026-11-04'), null)
+  eq(nextOccurrence('FREQ=', '2026-11-04'), null)
+  eq(nextOccurrence(42, '2026-11-04'), null)
+  eq(nextOccurrence(null, '2026-11-04'), null)
 })

@@ -87,9 +87,9 @@ async function page(vp = { width: 1500, height: 900 }, extra = {}) {
   const ctx = await b.newContext({ serviceWorkers: 'block' });
   const a = await ctx.newPage(), c = await ctx.newPage();
   for (const p of [a, c]) { await p.goto(BASE + '/#/inbox'); await p.waitForFunction(() => window.__lists && document.body.classList.contains('ready')); }
-  await a.evaluate(() => { window.__lists.DB.setMeta('syncEvery', 7); window.__lists.DB.setMeta('sync.sync', { key: new Uint8Array(32), dev: 'd_x', cursor: 0 }); });
+  await a.evaluate(() => { window.__lists.DB.setMeta('backupDays', 7); window.__lists.DB.setMeta('sync.sync', { key: new Uint8Array(32), dev: 'd_x', cursor: 0 }); });
   await c.waitForTimeout(600);
-  const r = await c.evaluate(() => ({ every: window.__lists.DB.getMeta('syncEvery'), label: document.querySelector('#sync .sl').textContent }));
+  const r = await c.evaluate(() => ({ every: window.__lists.DB.getMeta('backupDays'), label: document.querySelector('#sync .sl').textContent }));
   check('platform-1/7: other tab loads sync and mirrors settings', r.every === 7 && r.label !== 'On this device', JSON.stringify(r)); await ctx.close();
 }
 { // real-device finding (Mac, 2026-11-07): completing an item in Today must not move it

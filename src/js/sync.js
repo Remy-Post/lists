@@ -2,9 +2,10 @@
 // Protocol, key handling and threat model: server/README.md. No dependencies.
 const E = new TextEncoder(), D = new TextDecoder(), S = crypto.subtle;
 const A32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32
-const MIN = 60e3, PUSH_STALE = 2 * MIN, PULL_STALE = 15 * MIN, BACKUP_AGE = 3 * 1440 * MIN;
+const MIN = 60e3, PUSH_STALE = 2 * MIN, PULL_STALE = 15 * MIN, BACKUP_AGE = 3 * 1440 * MIN, FRESH = MIN - 5e3;
 const MAX_ROWS = 200, MAX_BYTES = 256 << 10, MAX_BLOB = 90 * 1024, KEEPALIVE = 65536;
 const K = 'sync'; // meta key: { key: Uint8Array(32), dev, cursor, lastPush, lastPull, dirty, mk }
+const zone = () => Intl.DateTimeFormat().resolvedOptions().timeZone; // IANA, e.g. "Europe/Lisbon"
 
 const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
 const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
@@ -65,10 +66,11 @@ export async function unseal(key, row) {
 }
 
 export function createSync({
-  db, onStatus = () => {}, base = '/api', nav = globalThis.navigator, now = Date.now,
-  fetch: f = (...a) => fetch(...a), backupAgeMs = () => BACKUP_AGE, staleMs = () => null,
+  db, onStatus = () => {}, base = '/api', admin = '/mcp-admin', nav = globalThis.navigator, now = Date.now,
+  fetch: f = (...a) => fetch(...a), backupAgeMs = () => BACKUP_AGE,
+  visible = () => globalThis.document?.visibilityState == 'visible', // never true in Node (the MCP bridge)
 }) {
-  let st = {}, keys, keysFor, lastQ, lastEval = -1e9, timer = 0, fails = 0, backoff = 0, halted = 0;
+  let st = {}, keys, keysFor, lastQ, lastEval = -1e9, timer = 0, fresh = 0, fails = 0, backoff = 0, halted = 0, tzSent = 0;
   let chain = Promise.resolve(), held = 0;
 
   const load = async () => (st = (await db.getMeta(K)) || {});
@@ -180,7 +182,9 @@ export function createSync({
     status('idle', bad ? bad + ' rows failed to decrypt' : big ? big + ' items too large to sync' : undefined);
   }
 
-  // The gate (PLAN §5): stale (outbox dirty ≥ 2 min, or last pull ≥ 15 min) and a good link.
+  // The gate (PLAN §5): stale (outbox dirty ≥ 2 min, or last pull ≥ 15 min) and a good link. An open, visible
+  // app on a good link also syncs every minute, so changes from other devices and from Claude & Grok show up
+  // while you look (MCP-PLAN §10, Remy: "sync whenever there's Wi-Fi"). The backup-age rule never applies to that.
   async function gate() {
     await load();
     if (!st.key) return status('unpaired');
@@ -189,14 +193,25 @@ export function createSync({
     if (halted || t < backoff) return;
     const n = (await db.getOutbox()).length;
     if (!n != !st.dirty) st.dirty = n ? t : 0, await save();
-    // Cadence: 'as you go' by default; a user-chosen interval (e.g. daily) replaces both thresholds.
-    const iv = staleMs();
-    if (!(n && t - st.dirty >= (iv ?? PUSH_STALE) || t - (st.lastPull || 0) >= (iv ?? PULL_STALE))) return;
-    if (!relaxed()) {
+    const age = t - (st.lastPull || 0), stale = n && t - st.dirty >= PUSH_STALE || age >= PULL_STALE;
+    // Every 55 s, on our own timer rather than main.js's minute tick (whose phase is arbitrary), so a change made
+    // elsewhere just after a pull still shows up within 60 s of being made: 55 s + the pull itself.
+    const recheck = (ms) => { if (visible()) clearTimeout(fresh), fresh = setTimeout(() => api.maybeSync('timer'), ms), fresh.unref?.(); };
+    if (!stale && !(visible() && age >= FRESH)) return recheck(FRESH - age);
+    if (!(stale && relaxed())) {
       const q = await linkQuality();
-      if (q != 'good') return status(q == 'poor' ? 'idle' : q, q == 'poor' ? 'Waiting for a good connection' : undefined);
+      // Only a stale device reports waiting; a skipped freshness check has nothing to say.
+      if (q != 'good') return stale ? status(q == 'poor' ? 'idle' : q, q == 'poor' ? 'Waiting for a good connection' : undefined) : undefined;
     }
     await run();
+    recheck(FRESH);
+  }
+
+  // Claude & Grok: while the connector is on, re-send this device's time zone once per visible session, so the
+  // bridge's "today" follows Remy when he travels (MCP-PLAN §10). Best effort; nothing waits on it.
+  async function sendTz() {
+    const s = await db.getMeta(K);
+    if (s && s.key && online() && (await api.admin('status')).connected) await api.admin('tz');
   }
 
   const api = {
@@ -204,6 +219,7 @@ export function createSync({
     /** Cheap to call often (edits, timers, visibility, online, connection change): throttled to one check per 2 s. */
     maybeSync(reason) {
       if (reason == 'online') backoff = 0;
+      if (!tzSent && visible()) tzSent = 1, sendTz().catch(() => {});
       const wait = lastEval + 2e3 - now();
       if (wait > 0) {
         if (!timer) timer = setTimeout(() => (timer = 0, api.maybeSync(reason)), wait), timer.unref?.();
@@ -257,6 +273,7 @@ export function createSync({
     },
     /** On visibilitychange:hidden / pagehide: push the outbox with fetch keepalive if the body is < 64 KiB. */
     async flushOnHide() {
+      tzSent = 0; // the visible session is over
       try {
         const s = await db.getMeta(K);
         if (!s || !s.key || !online()) return false;
@@ -274,6 +291,21 @@ export function createSync({
         if (st.dev == s.dev) Object.assign(st, p);
         return true;
       } catch { return false; }
+    },
+    /** Claude & Grok connector admin, same origin (MCP-PLAN §10): admin('status') is a GET; 'connect' and 'tz' POST
+        { code, tz } with this device's pairing code and IANA time zone, 'disconnect' POSTs { code }. Never rejects:
+        resolves the JSON reply plus its HTTP status (0 = unreachable, or backup is off). */
+    async admin(op) {
+      try {
+        let init = { cache: 'no-store' };
+        if (op != 'status') {
+          const s = await db.getMeta(K);
+          if (!s || !s.key) return { status: 0 };
+          init = { ...init, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: encodeKey(s.key), ...(op != 'disconnect' && { tz: zone() }) }) };
+        }
+        const r = await f(admin + '/' + op, init);
+        return { ...(await r.json().catch(() => ({}))), status: r.status };
+      } catch { return { status: 0 }; }
     },
   };
   return api;

@@ -10,6 +10,8 @@ node tests/e2e/net3g.mjs 5      # 3G / Slow 4G / packet-level 3G timings + sync 
 node tests/e2e/persist.mjs 10   # SIGKILL persistence                                       (~20 min)
 node tests/e2e/flows.mjs        # keyboard flows (1728×1000), touch flows (412×891), 2 tabs (~1.5 min)
 node tests/e2e/sync.mjs         # two devices against one sync server                       (~1 min)
+node tests/e2e/connector.mjs    # Settings → Claude & Grok, stubbed /mcp-admin/*, both themes (~1 min)
+node tests/e2e/connector-e2e.mjs  # real sync server + bridge + app: MCP edits reach the open page ≤ 60 s (~7 min)
 node tests/e2e/perf.mjs         # 2k input latency, 500-row render, 10k boot                (~6 min)
 node tests/e2e/smoke.mjs        # (pre-existing) boot + screenshots; needs BASE=<url> of a running server
 ```
@@ -21,7 +23,8 @@ at another build directory (e.g. `OUT=tests/e2e/out/dist-x node build.mjs`, then
 Suites write `tests/e2e/out/<suite>.json`; copy them aside before testing another build.
 
 Ports used (all bound to 127.0.0.1, all killed on exit): static 8088–8098 and 8089/8093 (with `/api` proxied),
-sync servers 8094 and 8099, TCP proxies 8095/8096. Sync servers use a throwaway SQLite file in `$TMPDIR` with
+sync servers 8091 (connector), 8094 and 8099, TCP proxies 8095/8096; connector-e2e uses static 8101, sync 8102 and
+the bridge 8103. Sync servers use a throwaway SQLite file in `$TMPDIR` with
 `LISTS_NEW_VAULTS=1000 LISTS_FAIL_MAX=1000` so the per-IP limits don't trip during tests.
 
 `lib.mjs` holds the shared pieces: build, static/sync server spawn, a byte-counting / link-shaping TCP proxy,

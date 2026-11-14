@@ -70,3 +70,27 @@ for (const sd of [7, 42, 1234]) test(`incremental counts and open items equal a 
     assert.deepEqual(S.qLogbook(100000).slice().sort(), expectLog.sort(), `Logbook after step ${step}`);
   }
 });
+
+test('a record named root never enters the tree, so a bad synced write cannot recurse (audit 06, S1)', () => {
+  S.hydrate([]);
+  S.patch(S.INBOX, { kind: 'inbox', title: 'Inbox', pos: { parent: S.ROOT, key: 'a0', prev: null } });
+  S.patch('n1', { title: 'list', pos: { parent: S.ROOT, key: 'a1', prev: null } });
+  S.patch('n2', { title: 'due', when: '2026-11-07', pos: { parent: 'n1', key: 'a0', prev: null } });
+  const today = '2026-11-07', open = S.countOpen(S.ROOT);
+  const check = (label) => {
+    assert.equal(S.countOpen(S.ROOT), open, label);
+    assert.deepEqual(S.qToday(today).day, ['n2'], label);
+    assert.deepEqual(S.qTrash(), [], label);
+    assert.deepEqual(S.children(S.ROOT), [S.INBOX, 'n1'], label);
+  };
+  S.patch(S.ROOT, { title: 'x' }); // no pos: would default under the Inbox, making root → inbox → root
+  check('patched with no pos');
+  S.patch(S.ROOT, { pos: { parent: S.ROOT, key: 'a5', prev: null } });
+  check('patched under itself');
+  S.patch(S.ROOT, { deleted: 'trash', deletedAt: 1 });
+  check('patched into Trash');
+  S.mergeRemote([{ id: S.ROOT, f: { pos: [{ parent: 'n2', key: 'a0', prev: null }, 'zzzzzzzzz.0000.x'] }, v: 'zzzzzzzzz.0000.x' }]);
+  check('merged from another device');
+  S.hydrate(S.allRecords()); // a fresh device booting with the bad record
+  check('after hydrate');
+});

@@ -120,16 +120,17 @@ export function toggleDone(ids = target()) {
 function repeat(id, rr, now) {
   // Log this occurrence, then roll the original forward and reset its checklist.
   const base = S.val(id, 'when') || today();
+  // The next date first, so nothing is half-written if the rule can't be read.
+  const mode = S.val(id, 'repeatFrom') || 'when';
+  let next = nextOccurrence(rr, base, mode, today());
+  // An overdue on-schedule repeat rolls to the first occurrence on or after today (req-dates-views-2).
+  for (let i = 0; mode === 'when' && next && next < today() && i < 1000; i++) next = nextOccurrence(rr, next, mode, today());
   // The log keeps the occurrence's date, so it stays struck in Today and lands in the Logbook.
   O.create({
     kind: 'log', title: S.val(id, 'title'), notes: S.val(id, 'notes'), done: true, doneAt: now,
     when: base <= today() ? base : today(), evening: S.val(id, 'evening'), deadline: S.val(id, 'deadline'),
     pos: S.posAt(S.parentOf(id), S.children(S.parentOf(id)).length), origin: id,
   });
-  const mode = S.val(id, 'repeatFrom') || 'when';
-  let next = nextOccurrence(rr, base, mode, today());
-  // An overdue on-schedule repeat rolls to the first occurrence on or after today (req-dates-views-2).
-  for (let i = 0; mode === 'when' && next && next < today() && i < 1000; i++) next = nextOccurrence(rr, next, mode, today());
   const f = { when: next };
   const dl = S.val(id, 'deadline'), w = S.val(id, 'when');
   if (dl && w) f.deadline = addDays(next, Math.round((fromYMD(dl) - fromYMD(w)) / 864e5));
@@ -227,12 +228,21 @@ export function trash(ids = target()) {
   notify('trash', list);
 }
 export function restore(ids) {
+  // Void is gone for good (its text is blanked): restoring it would only bring back an empty row.
+  ids = ids.filter((id) => S.val(id, 'deleted') !== 'void');
   O.tx('Restore', () => { for (const id of ids) O.set(id, { deleted: false, deletedAt: null }); }, { ctx: ctx() });
 }
 export function destroy(ids) {
-  O.tx('Delete forever', () => {
-    for (const id of ids) { for (const d of S.descendants(id)) O.set(d, { deleted: 'void', title: '', notes: '' }); O.set(id, { deleted: 'void', title: '', notes: '' }); }
-  });
+  // Walk childrenAll, not children: a child trashed on its own before its parent would otherwise move to the
+  // Inbox when the parent is voided and reappear in Trash with its text intact. Collect everything first,
+  // because each void re-parents that node's subtree mid-walk.
+  const all = new Set(), todo = [...ids];
+  while (todo.length) {
+    const id = todo.pop();
+    if (all.has(id) || id === S.ROOT || id === S.INBOX || !S.recs.has(id) || S.val(id, 'deleted') === 'void') continue;
+    all.add(id); todo.push(...S.childrenAll(id));
+  }
+  O.tx('Delete forever', () => { for (const id of all) O.set(id, { deleted: 'void', title: '', notes: '' }); });
 }
 export function toggleHeading(ids = target()) {
   const all = ids.every((id) => S.val(id, 'heading'));

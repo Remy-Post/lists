@@ -18,3 +18,13 @@
 /* Cheat sheet in balanced columns (S3-10). */
 .cheat .cols { display: block; columns: 3 250px; column-gap: 28px; }
 .cheat .grp { break-inside: avoid; margin-bottom: 8px; }
+
+/* Claude & Grok: the connector address reads as a link to paste, not as a pairing code to type. */
+.mcp .code { font: 520 15px/22px var(--font); letter-spacing: 0; margin: 4px 0 8px; }
+.mcp .k { font-weight: 560; }
+.settings .err { color: var(--red); }
+.mcp .warn { font-weight: 560; }
+.mcp p[role=status]:empty { margin: 0; }
+/* Busy buttons look busy: dimmed, no pointer, no press animation. */
+.settings .btn:disabled { opacity: .55; cursor: default; }
+.settings .btn:disabled:active { transform: none; background: var(--raised); }

@@ -61,11 +61,37 @@ ui.cheat = () => {
 ui.settings = async () => {
   const panel = h('section', { class: 'settings' });
   const entry = open(panel, { kind: phone() ? 'sheet' : 'modal', label: 'Settings' });
-  const draw = async () => {
+  // Claude & Grok keeps its own box, so the status reply redraws only that part (focus elsewhere stays put).
+  const mcpBox = h('div', { class: 'sblock mcp' });
+  // mcp: the GET /mcp-admin/status reply (status 200), a failed one (status ≠ 200: unknown), null until it arrives.
+  let code = null, mcp = null, offErr = null, blocked = false;
+  const turnOff = async () => {
+    // The connector can only be switched off with the pairing code, which Turn off forgets (MCP-PLAN §10).
+    // A fresh status if the server answers; otherwise what Settings saw on opening. Unknown never counts as off.
+    const s = await admin('status');
+    if (s.status == 200) mcp = s;
+    const on = mcp && mcp.status == 200 ? !!mcp.connected : true;
+    if (!confirm(on ? 'Stop syncing on this device? This also disconnects Claude & Grok. Your items stay here.' : 'Stop syncing on this device? Your items stay here.')) return drawMcp();
+    if (on) {
+      // Disconnect is idempotent: 200 when it was ours (on or already off), 403 when nothing of ours is there.
+      const r = await admin('disconnect');
+      if (r.status != 200 && r.status != 403) {
+        offErr = 'Couldn’t disconnect Claude & Grok, so backup is still on. Try again when you’re online.';
+        await draw(); offErr = null;
+        const b = panel.querySelector('[data-turnoff]');
+        b?.focus({ preventScroll: true });
+        b?.closest('.sblock').querySelector('.err')?.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      mcp = { ...mcp, status: 200, connected: false };
+    }
+    await ui.unpair(); draw();
+  };
+  const draw = async (mcpErr) => {
     const theme = localStorage.getItem('lists.theme') || 'system';
     const persisted = await DB.persisted();
     const ss = ui.syncState ? ui.syncState() : null;
-    const code = ui.pairingCode ? await ui.pairingCode() : null;
+    code = ui.pairingCode ? await ui.pairingCode() : null;
     const seg = (name, cur, opts, on) => h('div', { class: 'seg', role: 'radiogroup', 'aria-label': name }, ...opts.map(([v, l]) => h('button', { role: 'radio', 'aria-checked': String(cur === v), class: cur === v ? 'on' : '', onclick: () => { on(v); draw(); } }, l)));
     const age = ss && ss.lastPush ? relAge(Date.now() - ss.lastPush) : 'never';
     const days = DB.getMeta('backupDays') ?? 3;
@@ -76,18 +102,20 @@ ui.settings = async () => {
       code
         ? h('div', { class: 'sblock' },
           h('p', null, `Encrypted backup is on. Last backed up ${age}.`, ss && ss.message ? h('span', { class: 'muted' }, ' ' + ss.message) : null),
-          h('div', { class: 'srow' }, h('span', { class: 'k' }, 'Sync on Wi-Fi'), seg('Sync cadence', DB.getMeta('syncEvery') || 0, [[0, 'As you go'], [1, 'Daily'], [3, 'Every 3 days'], [7, 'Weekly']], (v) => DB.setMeta('syncEvery', v || null))),
-          h('div', { class: 'srow' }, h('span', { class: 'k' }, 'On mobile data after'), seg('Backup age', days, [[1, '1 day'], [3, '3 days'], [7, '7 days']], (v) => DB.setMeta('backupDays', v))),
-          h('p', { class: 'muted' }, 'Lists stays on this device and syncs only on Wi-Fi or a fast connection, on the cadence above. If the server copy is older than the second setting and you have unsent changes, it syncs on any connection except 2G or Data Saver.'),
+          h('div', { class: 'srow' }, h('span', { class: 'k' }, 'On mobile data after'), seg('On mobile data after', days, [[1, '1 day'], [3, '3 days'], [7, '7 days']], (v) => DB.setMeta('backupDays', v))),
+          h('p', { class: 'muted' }, 'Lists stays on this device. On Wi-Fi or a fast connection it syncs as you go, and every minute while it’s open. If the server copy is older than the setting above and you have unsent changes, it syncs on any connection except 2G or Data Saver.'),
+          offErr ? h('p', { class: 'err', role: 'alert' }, offErr) : null,
           h('div', { class: 'acts' },
             h('button', { class: 'btn', onclick: () => ui.syncNow() }, 'Sync now'),
             h('button', { class: 'btn', onclick: () => showCode(code) }, 'Pair another device'),
-            h('button', { class: 'btn danger', onclick: async () => { if (confirm('Stop syncing on this device? Your items stay here.')) { await ui.unpair(); draw(); } } }, 'Turn off')))
+            h('button', { class: 'btn danger', 'data-turnoff': '', onclick: turnOff }, 'Turn off')))
         : h('div', { class: 'sblock' },
           h('p', null, 'Your lists live on this device. Turn on backup to keep an end-to-end encrypted copy on the server and sync it to your other devices. The server only ever sees ciphertext.'),
           h('div', { class: 'acts' },
             h('button', { class: 'btn primary', onclick: async () => { try { const c = await ui.createVault(); draw(); showCode(c); } catch (e) { ui.toast('Could not reach the server'); } } }, 'Turn on backup'),
             h('button', { class: 'btn', onclick: () => joinPrompt(draw) }, 'I have a pairing code'))),
+      h('h3', null, 'Claude & Grok'),
+      drawMcp(mcpErr),
       h('h3', null, 'Storage'),
       h('p', { class: 'muted' }, persisted ? 'This browser has marked your data as persistent, so it won’t be cleared to save space.' : 'Your data is stored on this device. Installing Lists as an app makes it less likely the browser will ever clear it.'),
       persisted ? null : h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: async () => { const ok = await DB.askPersist(); ui.toast(ok ? 'Storage is now persistent' : 'The browser declined for now'); draw(); } }, 'Make storage persistent')),
@@ -105,7 +133,82 @@ ui.settings = async () => {
       h('p', { class: 'muted small', id: 'devinfo' }, `This device: ${innerWidth}×${innerHeight} CSS px, screen ${screen.width}×${screen.height}, ${devicePixelRatio}× pixels${matchMedia('(color-gamut: p3)').matches ? ', P3 colour' : ''}${navigator.connection ? ', ' + (navigator.connection.type || navigator.connection.effectiveType) : ''}.`),
     ].filter(Boolean)); // optional sections are null when absent; never render them as text
   };
+
+  /* Claude & Grok (MCP-PLAN §6, §10): this account's lists through the server bridge at /mcp. */
+  const admin = async (op) => { try { return await (await ui.loadSync()).admin(op); } catch { return { status: 0 }; } };
+  const failed = (r) => r.status == 403 ? 'Claude & Grok is linked to a different Lists account. To use it here, pair this device with that account (Settings → I have a pairing code). If you started a new account, the connector has to be reset on the server first.'
+    : r.status == 502 ? 'The connector couldn’t reach your backup. Try again in a minute.'
+    : r.status == 400 ? 'The connector doesn’t recognise this device’s time zone (' + Intl.DateTimeFormat().resolvedOptions().timeZone + '). Set the time zone in your system settings and try again.'
+    : r.status ? 'The connector isn’t working right now. Try again later.' : 'Couldn’t reach the server. Check your connection and try again.';
+  const connect = async () => {
+    if (!code) { // Connect turns backup on first: the bridge pairs with the encrypted backup like another device
+      try { await ui.createVault(); } catch { return 'Couldn’t turn on backup. Check your connection and try again.'; }
+      if (!(ui.syncState() || {}).lastPush) return 'Backup is on, but its first upload hasn’t finished. Try again once you’re online.';
+    }
+    const r = await admin('connect');
+    blocked = r.status == 403; // every retry would say the same; Connect comes back with the next status check
+    if (r.status != 200) return failed(r);
+    mcp = r;
+  };
+  const recheck = async () => { mcp = await admin('status'); blocked = false; };
+  const disconnect = async () => {
+    const r = await admin('disconnect');
+    if (r.status != 200) return failed(r);
+    mcp = { ...mcp, connected: false };
+  };
+  // A button that disables the box while its request runs, then redraws with any error inline.
+  const act = (label, busy, fn, cls) => {
+    const b = h('button', { class: cls ? 'btn ' + cls : 'btn', onclick: async () => {
+      for (const x of mcpBox.querySelectorAll('button')) x.disabled = true;
+      b.style.minWidth = b.offsetWidth + 'px'; // the row doesn't jump; draw() rebuilds the box after
+      b.textContent = busy;
+      const live = mcpBox.querySelector('.busy');
+      if (live) live.textContent = busy; // the disabled button lost focus, so say it here
+      await draw(await fn());
+      mcpBox.querySelector('button')?.focus({ preventScroll: true });
+    } }, label);
+    return b;
+  };
+  function drawMcp(err) {
+    const url = (mcp && mcp.url) || location.origin + '/mcp';
+    const addr = h('code', { class: 'code', id: 'mcp-addr', 'aria-label': 'Connector address' }, url);
+    // Feedback next to the button (and announced inside the dialog), not in a far-off toast.
+    const msg = h('p', { class: 'muted', role: 'status' });
+    const copyBtn = h('button', { class: 'btn', 'aria-label': 'Copy connector address', 'aria-describedby': 'mcp-warn', onclick: () => copy() }, 'Copy');
+    const copy = () => Promise.resolve().then(() => navigator.clipboard.writeText(url)).then(() => {
+      copyBtn.textContent = 'Copied'; msg.textContent = 'Address copied';
+      setTimeout(() => { copyBtn.textContent = 'Copy'; msg.textContent = ''; }, 2000);
+    }, () => { getSelection().selectAllChildren(addr); msg.textContent = 'Couldn’t copy. The address is selected, so copy it from there.'; });
+    const note = err ? h('p', { class: 'err', role: 'alert' }, err) : null;
+    const busy = h('span', { class: 'vh busy', role: 'status' });
+    mcpBox.replaceChildren(...(!mcp ? [h('p', { class: 'muted' }, 'Checking…')]
+      // A failed status check is unknown, never "not connected": Connect could be wrong, and Turn off must still disconnect.
+      : mcp.status != 200 ? [
+        h('p', null, 'Couldn’t check Claude & Grok. Check your connection.'),
+        note,
+        h('div', { class: 'acts' }, act('Try again', 'Checking…', recheck), busy)]
+      : !mcp.connected ? [
+        h('p', null, 'Ask Claude or Grok to read and change your lists, from any device.' + (code ? '' : ' Connecting turns on backup.')),
+        note,
+        blocked ? null : h('div', { class: 'acts' }, act('Connect Claude & Grok', 'Connecting…', connect), busy)]
+      : [
+        h('p', null, 'Connected. Add this address to Claude or Grok as a custom connector:'),
+        addr,
+        h('p', { class: 'warn', id: 'mcp-warn' }, 'Anyone with this address can read and change your lists.'),
+        h('div', { class: 'acts' }, copyBtn),
+        msg,
+        h('p', null, h('span', { class: 'k' }, 'Claude: '), 'Settings → Connectors → Add custom connector → paste the address → no sign-in. Works on claude.ai, the desktop and phone apps, and Claude Code.'),
+        h('p', null, h('span', { class: 'k' }, 'Grok Bot: '), 'Connect apps → Add a custom connector → Remote HTTPS → paste the address.'),
+        h('p', { class: 'muted' }, 'While connected, the server holds this account’s key, so it can read your lists even when your devices are off.'),
+        note,
+        code ? h('div', { class: 'acts' }, act('Disconnect', 'Disconnecting…', disconnect, 'danger'), busy)
+          : h('p', { class: 'muted' }, 'It’s linked to a Lists account that isn’t on this device. To disconnect it here, pair this device with that account.'),
+      ]).filter(Boolean));
+    return mcpBox;
+  }
   draw();
+  // Only a 200 replaces what we know; a failure shows as unknown (never as "not connected").
+  admin('status').then((r) => { if (r.status == 200 || !mcp || mcp.status != 200) mcp = r; drawMcp(); });
 };
 function relAge(ms) {
   const m = Math.round(ms / 6e4);

@@ -31,7 +31,7 @@ if (bc) bc.onmessage = (e) => {
   if (d.t === 'rec') { if (!inbox.length) queueMicrotask(() => mergeQuiet(inbox.splice(0))); inbox.push(d.r); }
   else if (d.t === 'meta') { DB.mirrorMeta(d.k, d.v); if (d.k === 'sync.sync' && d.v && d.v.key) loadSync().then(() => maybeSync('paired')).catch(() => {}); }
 };
-const SHARED_META = new Set(['syncEvery', 'backupDays']);
+const SHARED_META = new Set(['backupDays']);
 DB.onMeta((k, v) => { if (bc && (k.startsWith('sync.') || SHARED_META.has(k))) bc.postMessage({ t: 'meta', k, v }); });
 DB.onDiskNewer((list) => mergeQuiet(list));
 
@@ -154,7 +154,6 @@ function setupSync(createSync) {
     },
     onStatus: (s) => { syncStatus = s; paintSync(); },
     backupAgeMs: () => (DB.getMeta('backupDays') ?? 3) * 864e5,
-    staleMs: () => { const d = DB.getMeta('syncEvery'); return d ? d * 864e5 : null; },
   });
   // Paired devices must not read "On this device" until the first sync runs (req-trust-touch-02).
   sync.pairingCode().then((c) => {

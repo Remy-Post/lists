@@ -1,0 +1,12 @@
+# Build context is the repo root; send only what mcp/Dockerfile copies.
+*
+!package.json
+!src/js/store.js
+!src/js/ops.js
+!src/js/actions.js
+!src/js/parse.js
+!src/js/state.js
+!src/js/sync.js
+!mcp/package.json
+!mcp/package-lock.json
+!mcp/*.mjs

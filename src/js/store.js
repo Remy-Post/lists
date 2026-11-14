@@ -229,6 +229,7 @@ function insertSorted(p, id) {
   arr.splice(lo, 0, id);
 }
 function reparent(id, oldParent) {
+  if (id === ROOT) return; // never part of the tree (see rebuild)
   if (oldParent !== undefined) {
     const arr = kids.get(oldParent);
     if (arr) { const i = arr.indexOf(id); if (i >= 0) arr.splice(i, 1); }
@@ -244,7 +245,8 @@ let rebuilds = 0;
 function rebuild() {
   rebuilds++;
   eff.clear(); kids.clear();
-  for (const id of recs.keys()) eff.set(id, rawParent(id));
+  // ROOT is virtual: a synced record named 'root' would make root→inbox→root, which no walk survives.
+  for (const id of recs.keys()) if (id !== ROOT) eff.set(id, rawParent(id));
   // Concurrent moves on two devices can form a cycle neither saw. Break it deterministically:
   // the most recent move in the cycle loses and falls back to its previous parent, then to Inbox.
   // Linear time: nodes already known to reach ROOT end every later walk early (10k-item boot).
@@ -492,7 +494,7 @@ export function qLogbook(limit = 400) {
 }
 export function qTrash() {
   const out = [];
-  for (const [id] of recs) if (val(id, 'deleted') === 'trash' && ancestors(id).every((a) => !val(a, 'deleted'))) out.push(id);
+  for (const [id] of recs) if (id !== ROOT && val(id, 'deleted') === 'trash' && ancestors(id).every((a) => !val(a, 'deleted'))) out.push(id);
   return out.sort((a, b) => (val(b, 'deletedAt') || 0) - (val(a, 'deletedAt') || 0));
 }
 export function qSomeday() {

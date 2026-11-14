@@ -50,7 +50,8 @@ export function set(id, fields) {
     let c = cur.ch.get(id);
     if (!c) cur.ch.set(id, (c = { b: {}, a: {} }));
     for (const k in fields) {
-      if (!(k in c.b)) c.b[k] = existed ? S.val(id, k) : undefined;
+      // A new node's "before" text is blank, so undoing its creation voids it without keeping (and syncing) its text.
+      if (!(k in c.b)) c.b[k] = existed || k == 'title' || k == 'notes' ? S.val(id, k) : undefined;
       c.a[k] = fields[k];
     }
     if (!existed) c.b.deleted = 'void';

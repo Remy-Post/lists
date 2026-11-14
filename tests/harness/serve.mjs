@@ -1,23 +1,30 @@
 // serve.mjs — a production-like static server for tests: precompressed br/gz, the same caching and CSP
-// as the Caddy block, and /api proxied to a local sync server (SYNC_PORT, optional).
+// as the Caddy block, /api proxied to a local sync server (SYNC_PORT, optional), and /mcp + /mcp-admin/* proxied
+// to a local connector bridge (MCP_PORT, optional; node mcp/server.mjs).
 // Usage: node tests/harness/serve.mjs <dir> <port>
 import { createServer, request } from 'node:http';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, normalize } from 'node:path';
 
-const dir = process.argv[2] || 'dist', port = +(process.argv[3] || 8080), SYNC = process.env.SYNC_PORT;
+const dir = process.argv[2] || 'dist', port = +(process.argv[3] || 8080), SYNC = process.env.SYNC_PORT, MCP = process.env.MCP_PORT;
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain; charset=utf-8', '.json': 'application/json' };
 const hashes = existsSync(join(dir, 'csp-script-hashes.txt')) ? readFileSync(join(dir, 'csp-script-hashes.txt'), 'utf8').trim() : '';
 const CSP = `default-src 'none'; script-src 'self' ${hashes}; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 
+/** Pass the request through to 127.0.0.1:port as Caddy's reverse_proxy does (Host and Origin kept, X-Real-IP set). */
+function proxy(req, res, port) {
+  const p = request({ host: '127.0.0.1', port, path: req.url, method: req.method, headers: { ...req.headers, 'x-real-ip': '127.0.0.1' } }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
+  p.on('error', () => { res.writeHead(502); res.end(); });
+  req.pipe(p);
+}
+
 createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
-  if (url.pathname.startsWith('/api/')) {
-    if (!SYNC) { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"no sync server"}'); return; }
-    const p = request({ host: '127.0.0.1', port: SYNC, path: req.url, method: req.method, headers: { ...req.headers, 'x-real-ip': '127.0.0.1' } }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
-    p.on('error', () => { res.writeHead(502); res.end(); });
-    req.pipe(p);
-    return;
+  const api = url.pathname.startsWith('/api/'), mcp = url.pathname === '/mcp' || url.pathname.startsWith('/mcp-admin/');
+  if (api || mcp) {
+    const port = api ? SYNC : MCP;
+    if (port) return proxy(req, res, port);
+    res.writeHead(503, { 'content-type': 'application/json' }); res.end(`{"error":"no ${api ? 'sync server' : 'connector'}"}`); return;
   }
   let path = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '');
   if (path.endsWith('/')) path += 'index.html';
@@ -33,4 +40,4 @@ createServer((req, res) => {
   headers['content-length'] = body.length;
   res.writeHead(200, headers);
   res.end(req.method === 'HEAD' ? undefined : body);
-}).listen(port, '127.0.0.1', () => console.log(`serving ${dir} on http://127.0.0.1:${port}` + (SYNC ? ` (api → :${SYNC})` : '')));
+}).listen(port, '127.0.0.1', () => console.log(`serving ${dir} on http://127.0.0.1:${port}` + (SYNC ? ` (api → :${SYNC})` : '') + (MCP ? ` (mcp → :${MCP})` : '')));

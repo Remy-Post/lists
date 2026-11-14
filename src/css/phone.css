@@ -74,8 +74,8 @@ body.typing .tail { min-height: 50vh; }
 .lyr.modal .panel { top: 10svh; }
 .insp-sheet { padding: 4px 18px 18px; }
 .i-field { min-height: 50px; }
-.btn { height: 44px; padding: 0 16px; font-size: 14.5px; }
-.seg button { height: 40px; min-width: 48px; }
+.btn { height: 48px; padding: 0 16px; font-size: 14.5px; }
+.seg button { height: 44px; min-width: 48px; }
 .dp-head .nav { width: 44px; height: 44px; }
 .dp { width: auto; padding: 6px 12px 12px; }
 .dp-in { height: 48px; font-size: 16px; }

@@ -158,10 +158,13 @@ function occ(R, s, a) {
   return null
 }
 
+// A rule it can't read (synced from elsewhere) gives null, never a throw.
 export function nextOccurrence(rule, from, repeatFrom = 'when', done) {
-  const R = rp(rule), b = fromS(repeatFrom == 'done' && done || from || done)
-  const r = plain(R) ? add(b, +R.INTERVAL || 1, R.FREQ[0].toLowerCase()) : occ(R, b + 1, b)
-  return r == null || R.UNTIL && toS(r).replace(/-/g, '') > R.UNTIL.slice(0, 8) ? null : toS(r)
+  try {
+    const R = rp(rule), b = fromS(repeatFrom == 'done' && done || from || done)
+    const r = plain(R) ? add(b, +R.INTERVAL || 1, R.FREQ[0].toLowerCase()) : occ(R, b + 1, b)
+    return r == null || R.UNTIL && toS(r).replace(/-/g, '') > R.UNTIL.slice(0, 8) ? null : toS(r)
+  } catch { return null }
 }
 
 export function parseQuick(text, now = new Date(), { ignore = [] } = {}) {
@@ -249,8 +252,9 @@ export function describeRRule(rule) {
 }
 
 export function formatDay(s, now = new Date()) {
-  if (!s) return ''
   const n = fromS(s), t = day0(now), d = n - t, [y, m, dd] = P(n)
+  // A synced record can carry anything ("next tuesday", "2026-13-40"): show nothing rather than break the row.
+  if (!/^\d{4}-\d\d-\d\d$/.test(s) || n != n) return ''
   return d == 0 ? 'Today' : d == 1 ? 'Tomorrow' : d == -1 ? 'Yesterday'
     : d > 1 && d < 7 ? cap(DAYS[dow(n)].slice(0, 3))
     : cap(MONS[m].slice(0, 3)) + ' ' + dd + (y == P(t)[0] ? '' : ', ' + y)

@@ -71,7 +71,8 @@ function device(name, opts = {}) {
   const nav = { onLine: true, connection: { type: 'wifi', effectiveType: '4g', rtt: 50, saveData: false }, ...opts.nav };
   const sync = createSync({
     db, base: srv.base, nav, now: () => clock.t, onStatus: (s) => (process.env.DBG && console.log(name, s.state, s.message), statuses.push(s)),
-    fetch: (url, init = {}) => (calls.push({ url, init }), fetch(url, init)),
+    fetch: (url, init = {}) => (calls.push({ url, init }), (opts.fetch || fetch)(url, init)),
+    visible: opts.visible, // undefined → the default, which is never visible in Node
   });
   return { name, db, sync, statuses, calls, clock, nav, last: () => statuses.at(-1), syncs: () => calls.filter((c) => c.url.endsWith('/sync')).length };
 }
@@ -262,8 +263,8 @@ test('flushOnHide: keepalive push under 64 KiB, push only, then acks', async () 
 });
 
 // ---- the gate -------------------------------------------------------------------------------
-async function pairedDevice(nav) {
-  const D = device('G', { nav });
+async function pairedDevice(nav, opts) {
+  const D = device('G', { nav, ...opts });
   await D.sync.createVault();
   await D.sync.syncNow();
   return D;
@@ -300,6 +301,70 @@ test('gate: push after the outbox has been dirty 2 min; pull after 15 min', asyn
   assert.equal(D.syncs(), n0 + 1);
   step(D, 61e3); await D.sync.maybeSync('visible');
   assert.equal(D.syncs(), n0 + 2, '15 min since last pull: pulled');
+});
+
+test('gate: an open, visible app on a good link syncs every minute; hidden, the 2/15-min rule stays (MCP-PLAN §10)', async () => {
+  let shown = true;
+  const D = await pairedDevice(undefined, { visible: () => shown });
+  const n = D.syncs();
+  step(D, 30e3); await D.sync.maybeSync('timer');
+  assert.equal(D.syncs(), n, '30 s: nothing yet');
+  step(D, 30e3); await D.sync.maybeSync('timer');
+  assert.equal(D.syncs(), n + 1, 'a minute: pulled');
+  D.db.edit('f1', 'title', 'typed while looking');
+  step(D, 3e3); await D.sync.maybeSync('edit');
+  step(D, 57e3); await D.sync.maybeSync('timer');
+  assert.equal(D.syncs(), n + 2, 'the edit went out within the minute');
+  assert.equal(D.db.outbox.size, 0);
+  shown = false;
+  step(D, 5 * 60e3); await D.sync.maybeSync('timer');
+  assert.equal(D.syncs(), n + 2, 'hidden: back to the 15-minute pull');
+});
+
+test('gate: on a poor link the minute check stays quiet and never uses the backup-age rule', async () => {
+  const D = await pairedDevice({ connection: { effectiveType: '3g', rtt: 600 } }, { visible: () => true });
+  const n = D.syncs(), k = D.statuses.length;
+  step(D, 3 * 86400e3 + 60e3); // an old backup relaxes the gate only for stale work
+  await D.sync.maybeSync('timer');
+  assert.equal(D.syncs(), n + 1, 'stale and old: syncs on 3G');
+  step(D, 61e3); await D.sync.maybeSync('timer');
+  assert.equal(D.syncs(), n + 1, 'fresh again: a minute check needs a good link');
+  assert.equal(D.statuses.length, k + 2, 'and reports nothing (no "Waiting for a good connection")');
+});
+
+test('connector: admin() posts the pairing code (and zone); tz is re-sent once per visible session', async () => {
+  const seen = [];
+  let connected = true;
+  const stub = (url, init) => {
+    if (!url.startsWith('/mcp-admin/')) return fetch(url, init);
+    seen.push({ url, method: init.method || 'GET', body: init.body && JSON.parse(init.body) });
+    return Promise.resolve(Response.json(url.endsWith('/status') ? { connected, lastSync: null, url: 'https://lists.remypost.me/mcp' } : { ok: 1 }, { status: url.endsWith('/disconnect') ? 403 : 200 }));
+  };
+  const D = await pairedDevice(undefined, { visible: () => true, fetch: stub });
+  const code = await D.sync.pairingCode(), tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+  step(D, 3e3); await D.sync.maybeSync('visible'); await settle();
+  assert.deepEqual(seen.map((x) => x.method + ' ' + x.url), ['GET /mcp-admin/status', 'POST /mcp-admin/tz']);
+  assert.deepEqual(seen[1].body, { code, tz });
+  step(D, 3e3); await D.sync.maybeSync('timer'); await settle();
+  assert.equal(seen.length, 2, 'once per visible session');
+  await D.sync.flushOnHide();
+  connected = false;
+  step(D, 3e3); await D.sync.maybeSync('visible'); await settle();
+  assert.deepEqual(seen.slice(2).map((x) => x.url), ['/mcp-admin/status'], 'next session: checks, but not connected so no tz');
+
+  assert.deepEqual(await D.sync.admin('connect'), { ok: 1, status: 200 });
+  assert.deepEqual(seen.at(-1).body, { code, tz });
+  assert.deepEqual(await D.sync.admin('disconnect'), { ok: 1, status: 403 });
+  assert.deepEqual(seen.at(-1).body, { code }, 'disconnect sends only the code');
+  assert.equal((await D.sync.admin('status')).url, 'https://lists.remypost.me/mcp');
+
+  const U = device('U2', { fetch: stub });
+  const before = seen.length;
+  assert.deepEqual(await U.sync.admin('connect'), { status: 0 }, 'backup off: nothing to send');
+  assert.equal(seen.length, before);
+  const N = device('N', { fetch: () => Promise.reject(new TypeError('offline')) });
+  assert.deepEqual(await N.sync.admin('status'), { status: 0 }, 'unreachable never rejects');
 });
 
 test('gate: maybeSync is throttled to one check per 2 s', async () => {

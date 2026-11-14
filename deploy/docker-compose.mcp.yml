@@ -1,0 +1,49 @@
+# lists-mcp: the Claude & Grok connector (mcp/README.md). Run from the repo root:
+#   docker compose -f deploy/docker-compose.mcp.yml up -d --build
+# Its own compose project, so it never touches lists-sync. Caddy (n8n-caddy-1) reaches it as
+# lists-mcp:8788 on n8n_default (/mcp and /mcp-admin/*); no host port is published.
+name: lists-mcp
+services:
+  lists-mcp:
+    build:
+      context: ..
+      dockerfile: mcp/Dockerfile
+    image: lists-mcp:latest
+    container_name: lists-mcp
+    # The off switch wipes /data and exits; this brings the process back empty.
+    restart: unless-stopped
+    mem_limit: 96m
+    cpus: 0.25
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 10s
+    environment:
+      # X-Real-IP is believed only from Caddy, by container name (re-resolved every 60 s), as in lists-sync.
+      LISTS_TRUSTED_PROXIES: n8n-caddy-1
+      LISTS_SYNC_URL: http://lists-sync:8787
+      PUBLIC_URL: https://lists.remypost.me/mcp
+      # Required (mcp/README.md "Owner pin"): hex SHA-256 of Remy's vault token. Not a secret; without it the
+      # first stranger to connect from the public app would own the connector, so compose refuses to start.
+      LISTS_MCP_OWNER_SHA256: "${LISTS_MCP_OWNER_SHA256:?set the owner pin, see mcp/README.md Owner pin}"
+      # Collect garbage well before the 96 MB limit instead of being OOM-killed mid-save.
+      # A 1 MB semi-space trims ~4 MB of idle RSS; traffic is light, so the extra scavenges cost nothing.
+      NODE_OPTIONS: --max-old-space-size=64 --max-semi-space-size=1
+    volumes:
+      - lists_mcp_data:/data
+    networks:
+      - n8n_default
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "3" }
+
+volumes:
+  lists_mcp_data:
+    name: lists_mcp_data
+
+networks:
+  n8n_default:
+    external: true
